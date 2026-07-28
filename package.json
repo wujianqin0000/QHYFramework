@@ -1,7 +1,7 @@
 {
   "name": "com.wjq.qhy-framework",
   "displayName": "QHY Framework",
-  "version": "1.0.2",
+  "version": "1.1.0",
   "unity": "2022.3",
   "description": "A production integration of QFramework, HybridCLR and YooAsset with hot-update boot flow, resource adapters, client self-update and release tooling.",
   "keywords": [

@@ -24,7 +24,8 @@ every screenshot descriptive alt text.
 Prefer **QHY Framework Developer/UPM Package Publisher** in the framework
 authoring project. Its Major, Minor, and Patch actions synchronize the UPM
 version, documentation version, bilingual snapshots, and Git tag in a staging
-copy. Local files change only after the remote publication succeeds.
+copy, then publish GitHub and Gitee together. Local files change only after
+both remote publications succeed.
 
 To create only a documentation snapshot manually, first set the UPM root
 `package.json` to the target version, then run:
