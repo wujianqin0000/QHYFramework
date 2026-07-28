@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630">
+  <defs><linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#07141e"/><stop offset="1" stop-color="#10334a"/></linearGradient><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#72f2d0"/><stop offset="1" stop-color="#2589ff"/></linearGradient></defs>
+  <rect width="1200" height="630" fill="url(#bg)"/>
+  <path fill="url(#g)" d="M176 161 310 236v150l-134 75-134-75V236l134-75Z"/>
+  <path fill="#07151f" d="M95 242h59v32h-27v75h27v32H95V242Zm109 0h64v139h-64v-32h32v-75h-32v-32Z"/><path fill="#07151f" d="M149 296h59v32h-59z"/>
+  <text x="370" y="285" fill="#f4fbff" font-family="Arial, sans-serif" font-size="76" font-weight="700">QHY Framework</text>
+  <text x="373" y="355" fill="#9cb8ca" font-family="Arial, sans-serif" font-size="32">QFramework × HybridCLR × YooAsset</text>
+  <text x="373" y="409" fill="#72f2d0" font-family="Arial, sans-serif" font-size="28">A production-ready Unity hot-update workflow</text>
+</svg>

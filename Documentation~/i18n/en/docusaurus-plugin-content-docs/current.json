@@ -1,0 +1,26 @@
+{
+  "version.label": {
+    "message": "Next"
+  },
+  "sidebar.tutorialSidebar.category.从零开始": {
+    "message": "Getting started"
+  },
+  "sidebar.tutorialSidebar.category.基础概念": {
+    "message": "Fundamentals"
+  },
+  "sidebar.tutorialSidebar.category.开发手册": {
+    "message": "Development guide"
+  },
+  "sidebar.tutorialSidebar.category.发布与运维": {
+    "message": "Release and operations"
+  },
+  "sidebar.tutorialSidebar.category.参考": {
+    "message": "Reference"
+  },
+  "sidebar.tutorialSidebar.category.术语表": {
+    "message": "Glossary"
+  },
+  "sidebar.tutorialSidebar.category.帮助": {
+    "message": "Help"
+  }
+}

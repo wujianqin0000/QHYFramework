@@ -1,0 +1,30 @@
+{
+    "name": "GameIntegration.AOT",
+    "rootNamespace": "GameIntegration",
+    "references": [
+        "YooAsset",
+        "HybridCLR.Runtime",
+        "QFramework",
+        "QFramework.CoreKit",
+        "ResKit",
+        "UIKit",
+        "AudioKit"
+    ],
+    "autoReferenced": true,
+    "defineConstraints": [
+        "QHY_HAS_YOOASSET",
+        "QHY_HAS_HYBRIDCLR"
+    ],
+    "versionDefines": [
+        {
+            "name": "com.tuyoogame.yooasset",
+            "expression": "[3.0.4,4.0.0)",
+            "define": "QHY_HAS_YOOASSET"
+        },
+        {
+            "name": "com.code-philosophy.hybridclr",
+            "expression": "[8.12.0,9.0.0)",
+            "define": "QHY_HAS_HYBRIDCLR"
+        }
+    ]
+}

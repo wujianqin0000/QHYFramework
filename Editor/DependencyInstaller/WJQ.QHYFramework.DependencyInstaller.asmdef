@@ -1,0 +1,8 @@
+{
+  "name": "WJQ.QHYFramework.DependencyInstaller",
+  "rootNamespace": "WJQ.QHYFramework.Editor",
+  "includePlatforms": [
+    "Editor"
+  ],
+  "autoReferenced": true
+}

@@ -1,0 +1,36 @@
+{
+  "name": "qhy-framework-docs",
+  "version": "1.0.2",
+  "private": true,
+  "scripts": {
+    "docusaurus": "docusaurus",
+    "start": "docusaurus start --locale zh-Hans",
+    "start:en": "docusaurus start --locale en",
+    "build": "docusaurus build",
+    "serve": "docusaurus serve",
+    "clear": "docusaurus clear",
+    "check": "node scripts/check-docs.mjs && docusaurus build && node scripts/check-output.mjs",
+    "docs:release": "node scripts/release-docs.mjs"
+  },
+  "dependencies": {
+    "@docusaurus/core": "3.10.2",
+    "@docusaurus/preset-classic": "3.10.2",
+    "@docusaurus/theme-mermaid": "3.10.2",
+    "@easyops-cn/docusaurus-search-local": "0.55.2",
+    "@mermaid-js/layout-elk": "0.1.9",
+    "@mdx-js/react": "3.1.1",
+    "clsx": "2.1.1",
+    "prism-react-renderer": "2.4.1",
+    "react": "19.1.1",
+    "react-dom": "19.1.1"
+  },
+  "devDependencies": {
+    "@docusaurus/module-type-aliases": "3.10.2",
+    "@docusaurus/types": "3.10.2",
+    "sharp": "0.34.3",
+    "typescript": "5.8.3"
+  },
+  "engines": {
+    "node": ">=22.0"
+  }
+}

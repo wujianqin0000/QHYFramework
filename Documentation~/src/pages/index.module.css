@@ -1,0 +1,73 @@
+.hero {
+  position: relative;
+  overflow: hidden;
+  padding: 8.5rem 0 7rem;
+  background:
+    radial-gradient(circle at 80% 15%, rgba(33, 212, 169, .24), transparent 28rem),
+    radial-gradient(circle at 18% 80%, rgba(55, 116, 255, .22), transparent 30rem),
+    linear-gradient(145deg, #07141e 0%, #0b1c2a 58%, #10283a 100%);
+  color: #f6fbff;
+}
+
+.hero::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background-image: linear-gradient(rgba(255,255,255,.035) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255,255,255,.035) 1px, transparent 1px);
+  background-size: 48px 48px;
+  mask-image: linear-gradient(to bottom, black, transparent);
+}
+
+.badge {
+  display: inline-block;
+  margin-bottom: 1.4rem;
+  padding: .35rem .75rem;
+  border: 1px solid rgba(116, 255, 218, .35);
+  border-radius: 99px;
+  color: #8ff5d9;
+  background: rgba(13, 60, 61, .45);
+  font-size: .85rem;
+  letter-spacing: .04em;
+}
+
+.title {
+  max-width: 900px;
+  margin: 0;
+  font-size: clamp(2.8rem, 6vw, 5.4rem);
+  line-height: 1.04;
+  letter-spacing: -.045em;
+}
+
+.subtitle {
+  max-width: 780px;
+  margin: 1.8rem 0 2.2rem;
+  color: #b9ccdc;
+  font-size: clamp(1.05rem, 2vw, 1.35rem);
+  line-height: 1.75;
+}
+
+.actions {display: flex; align-items: center; flex-wrap: wrap; gap: 1rem;}
+.textLink {color: #8ff5d9; font-weight: 700;}
+.textLink:hover {color: white; text-decoration: none;}
+.featureSection {padding: 5rem 0; background: var(--ifm-background-surface-color);}
+.featureGrid {display: grid; grid-template-columns: repeat(3, 1fr); gap: 1.2rem;}
+.featureCard {padding: 2rem; border: 1px solid var(--ifm-color-emphasis-200); border-radius: 18px; background: var(--ifm-background-color);}
+.featureCard h2 {margin-top: 1.3rem; font-size: 1.4rem;}
+.featureCard p {margin-bottom: 0; color: var(--ifm-color-emphasis-700); line-height: 1.7;}
+.featureIcon {display: inline-grid; place-items: center; width: 2.7rem; height: 2.7rem; border-radius: 10px; color: #06271f; background: #60edc7; font-weight: 900;}
+.flowSection {padding: 5.5rem 0 7rem;}
+.eyebrow {color: var(--ifm-color-primary); font-size: .78rem; font-weight: 800; letter-spacing: .18em;}
+.flowSection h2 {font-size: 2.2rem; margin: .6rem 0 2rem;}
+.flow {display: flex; align-items: stretch; gap: .7rem;}
+.flowItem {flex: 1; display: flex; flex-direction: column; gap: .65rem; min-height: 105px; padding: 1rem; border-radius: 12px; background: var(--ifm-color-emphasis-100); font-weight: 700;}
+.flowItem span {color: var(--ifm-color-primary); font-size: .8rem;}
+.arrow {align-self: center; color: var(--ifm-color-emphasis-500);}
+
+@media (max-width: 800px) {
+  .hero {padding: 5.5rem 0 4rem;}
+  .featureGrid {grid-template-columns: 1fr;}
+  .flow {display: grid; grid-template-columns: 1fr;}
+  .arrow {transform: rotate(90deg); justify-self: center;}
+}

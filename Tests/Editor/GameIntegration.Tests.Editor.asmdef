@@ -1,0 +1,41 @@
+{
+    "name": "GameIntegration.Tests.Editor",
+    "rootNamespace": "",
+    "references": [
+        "GameIntegration.AOT",
+        "GameIntegration.Editor",
+        "QFramework.CoreKit",
+        "ResKit",
+        "UIKit",
+        "AudioKit",
+        "YooAsset"
+    ],
+    "includePlatforms": [
+        "Editor"
+    ],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": true,
+    "precompiledReferences": [
+        "nunit.framework.dll"
+    ],
+    "autoReferenced": false,
+    "defineConstraints": [
+        "UNITY_INCLUDE_TESTS",
+        "QHY_HAS_YOOASSET",
+        "QHY_HAS_HYBRIDCLR"
+    ],
+    "versionDefines": [
+        {
+            "name": "com.tuyoogame.yooasset",
+            "expression": "[3.0.4,4.0.0)",
+            "define": "QHY_HAS_YOOASSET"
+        },
+        {
+            "name": "com.code-philosophy.hybridclr",
+            "expression": "[8.12.0,9.0.0)",
+            "define": "QHY_HAS_HYBRIDCLR"
+        }
+    ],
+    "noEngineReferences": false
+}

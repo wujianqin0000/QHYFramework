@@ -1,0 +1,144 @@
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.IO;
+using System.IO.Compression;
+using System.Threading;
+
+internal static class Program
+{
+    private static int Main(string[] args)
+    {
+        string log = Path.Combine(Path.GetTempPath(), "GameIntegrationUpdater.log");
+        try
+        {
+            if (args.Length == 1 && string.Equals(args[0], "--self-test", StringComparison.OrdinalIgnoreCase))
+                return 0;
+            Dictionary<string, string> values = Parse(args);
+            int pid = int.Parse(Required(values, "pid"));
+            string archive = Path.GetFullPath(Required(values, "archive"));
+            string root = Path.GetFullPath(Required(values, "root")).TrimEnd(Path.DirectorySeparatorChar);
+            string entry = Required(values, "entry").Replace('/', Path.DirectorySeparatorChar);
+            string version = Required(values, "version");
+            bool elevated = values.ContainsKey("elevated");
+            ValidateRoot(root, entry);
+            WaitForExit(pid);
+            try { Apply(archive, root, entry, version, log); }
+            catch (UnauthorizedAccessException)
+            {
+                if (elevated) throw;
+                RelaunchElevated(args);
+            }
+            return 0;
+        }
+        catch (Exception exception)
+        {
+            File.AppendAllText(log, DateTime.UtcNow.ToString("O") + " " + exception + Environment.NewLine);
+            return 1;
+        }
+    }
+
+    private static void Apply(string archive, string root, string entry, string version, string log)
+    {
+        if (!File.Exists(archive)) throw new FileNotFoundException("Update archive missing", archive);
+        string parent = Directory.GetParent(root).FullName;
+        string safeVersion = version.Replace('.', '_').Replace('/', '_').Replace('\\', '_');
+        string staging = Path.Combine(parent, ".gameintegration-staging-" + safeVersion);
+        string backup = Path.Combine(parent, ".gameintegration-backup");
+        DeleteDirectory(staging);
+        DeleteDirectory(backup);
+        Directory.CreateDirectory(staging);
+        ExtractSafely(archive, staging);
+        if (!File.Exists(Path.Combine(staging, ".gameintegration-client")) ||
+            !File.Exists(Path.Combine(staging, entry)))
+            throw new InvalidDataException("New client marker or entry executable missing");
+
+        bool oldMoved = false;
+        try
+        {
+            Directory.Move(root, backup);
+            oldMoved = true;
+            Directory.Move(staging, root);
+            Process next = Process.Start(new ProcessStartInfo(Path.Combine(root, entry))
+            {
+                WorkingDirectory = root,
+                UseShellExecute = true
+            });
+            Thread.Sleep(5000);
+            if (next == null || next.HasExited)
+                throw new InvalidOperationException("New client failed to stay running");
+            try { DeleteDirectory(backup); } catch { }
+            File.AppendAllText(log, DateTime.UtcNow.ToString("O") + " Updated to " + version + Environment.NewLine);
+        }
+        catch
+        {
+            if (oldMoved)
+            {
+                try { DeleteDirectory(root); } catch { }
+                if (!Directory.Exists(root) && Directory.Exists(backup)) Directory.Move(backup, root);
+                try { Process.Start(new ProcessStartInfo(Path.Combine(root, entry)) { WorkingDirectory = root, UseShellExecute = true }); } catch { }
+            }
+            throw;
+        }
+    }
+
+    private static void ExtractSafely(string archivePath, string destination)
+    {
+        string root = Path.GetFullPath(destination).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
+        using (ZipArchive archive = ZipFile.OpenRead(archivePath))
+        {
+            foreach (ZipArchiveEntry item in archive.Entries)
+            {
+                string target = Path.GetFullPath(Path.Combine(root, item.FullName.Replace('/', Path.DirectorySeparatorChar)));
+                if (!target.StartsWith(root, StringComparison.OrdinalIgnoreCase))
+                    throw new InvalidDataException("Archive entry escapes staging directory: " + item.FullName);
+                if (string.IsNullOrEmpty(item.Name)) { Directory.CreateDirectory(target); continue; }
+                Directory.CreateDirectory(Path.GetDirectoryName(target));
+                if (File.Exists(target)) File.Delete(target);
+                item.ExtractToFile(target);
+            }
+        }
+    }
+
+    private static void ValidateRoot(string root, string entry)
+    {
+        if (!Directory.Exists(root) || !File.Exists(Path.Combine(root, ".gameintegration-client")) ||
+            !File.Exists(Path.Combine(root, entry)))
+            throw new InvalidOperationException("Refusing to update an unmarked client directory");
+        string resolvedEntry = Path.GetFullPath(Path.Combine(root, entry));
+        string prefix = root + Path.DirectorySeparatorChar;
+        if (!resolvedEntry.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException("Entry executable escapes client directory");
+    }
+
+    private static void WaitForExit(int pid)
+    {
+        try { Process.GetProcessById(pid).WaitForExit(120000); }
+        catch (ArgumentException) { }
+        try { if (!Process.GetProcessById(pid).HasExited) throw new TimeoutException("Old client did not exit"); }
+        catch (ArgumentException) { }
+    }
+
+    private static void RelaunchElevated(string[] args)
+    {
+        string joined = string.Join(" ", Array.ConvertAll(args, Quote)) + " --elevated true";
+        Process.Start(new ProcessStartInfo(Process.GetCurrentProcess().MainModule.FileName, joined)
+        { UseShellExecute = true, Verb = "runas" });
+    }
+
+    private static Dictionary<string, string> Parse(string[] args)
+    {
+        var result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        for (int index = 0; index < args.Length; index += 2)
+        {
+            string key = args[index].TrimStart('-');
+            result[key] = index + 1 < args.Length ? args[index + 1] : "true";
+        }
+        return result;
+    }
+
+    private static string Required(Dictionary<string, string> values, string key)
+    { string value; if (!values.TryGetValue(key, out value) || string.IsNullOrWhiteSpace(value)) throw new ArgumentException("Missing --" + key); return value; }
+    private static string Quote(string value) { return "\"" + (value ?? "").Replace("\"", "\\\"") + "\""; }
+    private static void DeleteDirectory(string path) { if (Directory.Exists(path)) Directory.Delete(path, true); }
+}

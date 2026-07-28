@@ -1,0 +1,29 @@
+:root {
+  --ifm-color-primary: #087f68;
+  --ifm-color-primary-dark: #07725e;
+  --ifm-color-primary-darker: #066c59;
+  --ifm-color-primary-darkest: #055949;
+  --ifm-color-primary-light: #098c72;
+  --ifm-color-primary-lighter: #099278;
+  --ifm-color-primary-lightest: #0ba586;
+  --ifm-code-font-size: 92%;
+  --ifm-heading-font-family: Inter, "Noto Sans SC", "Microsoft YaHei", sans-serif;
+  --ifm-font-family-base: Inter, "Noto Sans SC", "Microsoft YaHei", sans-serif;
+}
+
+[data-theme='dark'] {
+  --ifm-color-primary: #5ce5c0;
+  --ifm-color-primary-dark: #3fdfb4;
+  --ifm-color-primary-darker: #30dcad;
+  --ifm-color-primary-darkest: #20bb91;
+  --ifm-background-color: #09151f;
+  --ifm-background-surface-color: #0d1c28;
+  --ifm-navbar-background-color: rgba(9, 21, 31, .9);
+}
+
+.navbar {backdrop-filter: blur(14px); box-shadow: 0 1px 0 var(--ifm-color-emphasis-200);}
+.navbar__logo img {width: 30px; height: 30px;}
+.theme-doc-markdown img {border: 1px solid var(--ifm-color-emphasis-200); border-radius: 12px;}
+.theme-doc-markdown table {display: table; width: 100%;}
+.theme-doc-markdown h2 {margin-top: 2.6rem;}
+.theme-code-block {box-shadow: 0 10px 28px rgba(0,0,0,.12);}

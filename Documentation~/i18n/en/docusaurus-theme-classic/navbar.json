@@ -1,0 +1,14 @@
+{
+  "title": {
+    "message": "QHY Framework"
+  },
+  "item.label.文档": {
+    "message": "Docs"
+  },
+  "item.label.十分钟入门": {
+    "message": "Quick start"
+  },
+  "item.label.发布": {
+    "message": "Release"
+  }
+}

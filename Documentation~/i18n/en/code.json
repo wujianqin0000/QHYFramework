@@ -1,0 +1,53 @@
+{
+  "home.hero.title": {
+    "message": "Three frameworks, one complete workflow"
+  },
+  "home.hero.subtitle": {
+    "message": "Install one UPM package for QFramework, HybridCLR, and YooAsset startup, development, hot update, release, and full-client upgrade."
+  },
+  "home.action.install": {
+    "message": "Install framework"
+  },
+  "home.action.quick": {
+    "message": "Ten-minute quick start"
+  },
+  "home.action.release": {
+    "message": "Publish an update →"
+  },
+  "home.install.title": {
+    "message": "One UPM package"
+  },
+  "home.install.body": {
+    "message": "Import com.wjq.qhy-framework; dependencies and the project skeleton are prepared automatically."
+  },
+  "home.hotupdate.title": {
+    "message": "Code and resource hot update"
+  },
+  "home.hotupdate.body": {
+    "message": "QFramework calls stay familiar while YooAsset owns every packaged resource."
+  },
+  "home.client.title": {
+    "message": "Full-client upgrade"
+  },
+  "home.client.body": {
+    "message": "When AOT changes, Boot can upgrade a Windows ZIP or Android APK."
+  },
+  "home.flow.title": {
+    "message": "From first run to a deliverable update"
+  },
+  "home.flow.0": {
+    "message": "Import UPM"
+  },
+  "home.flow.1": {
+    "message": "Edit Main"
+  },
+  "home.flow.2": {
+    "message": "Build hot update"
+  },
+  "home.flow.3": {
+    "message": "Upload to CDN"
+  },
+  "home.flow.4": {
+    "message": "Boot updates"
+  }
+}

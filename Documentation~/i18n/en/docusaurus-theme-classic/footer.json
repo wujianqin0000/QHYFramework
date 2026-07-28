@@ -1,0 +1,38 @@
+{
+  "link.title.开始": {
+    "message": "Start"
+  },
+  "link.item.label.安装": {
+    "message": "Installation"
+  },
+  "link.item.label.十分钟入门": {
+    "message": "Ten-minute quick start"
+  },
+  "link.item.label.常见问题": {
+    "message": "FAQ"
+  },
+  "link.title.参考": {
+    "message": "Reference"
+  },
+  "link.item.label.API": {
+    "message": "API"
+  },
+  "link.item.label.配置字段": {
+    "message": "Settings"
+  },
+  "link.item.label.术语表": {
+    "message": "Glossary"
+  },
+  "link.title.项目": {
+    "message": "Project"
+  },
+  "link.item.label.GitHub": {
+    "message": "GitHub"
+  },
+  "link.item.label.文档维护": {
+    "message": "Documentation maintenance"
+  },
+  "copyright": {
+    "message": "Copyright © 2026 QHY Framework"
+  }
+}

@@ -1,0 +1,29 @@
+{
+    "name": "GameIntegration.Editor",
+    "rootNamespace": "GameIntegration.Editor",
+    "references": [
+        "GameIntegration.AOT",
+        "YooAsset",
+        "YooAsset.Editor",
+        "HybridCLR.Editor",
+        "HybridCLR.Runtime"
+    ],
+    "includePlatforms": ["Editor"],
+    "autoReferenced": true,
+    "defineConstraints": [
+        "QHY_HAS_YOOASSET",
+        "QHY_HAS_HYBRIDCLR"
+    ],
+    "versionDefines": [
+        {
+            "name": "com.tuyoogame.yooasset",
+            "expression": "[3.0.4,4.0.0)",
+            "define": "QHY_HAS_YOOASSET"
+        },
+        {
+            "name": "com.code-philosophy.hybridclr",
+            "expression": "[8.12.0,9.0.0)",
+            "define": "QHY_HAS_HYBRIDCLR"
+        }
+    ]
+}

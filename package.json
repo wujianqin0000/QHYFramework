@@ -1,0 +1,36 @@
+{
+  "name": "com.wjq.qhy-framework",
+  "displayName": "QHY Framework",
+  "version": "1.0.2",
+  "unity": "2022.3",
+  "description": "A production integration of QFramework, HybridCLR and YooAsset with hot-update boot flow, resource adapters, client self-update and release tooling.",
+  "keywords": [
+    "qframework",
+    "hybridclr",
+    "yooasset",
+    "hot-update",
+    "upm"
+  ],
+  "author": {
+    "name": "WJQ"
+  },
+  "dependencies": {
+    "com.unity.ugui": "1.0.0",
+    "com.unity.modules.animation": "1.0.0",
+    "com.unity.modules.assetbundle": "1.0.0",
+    "com.unity.modules.audio": "1.0.0",
+    "com.unity.modules.imageconversion": "1.0.0",
+    "com.unity.modules.imgui": "1.0.0",
+    "com.unity.modules.jsonserialize": "1.0.0",
+    "com.unity.modules.physics": "1.0.0",
+    "com.unity.modules.physics2d": "1.0.0",
+    "com.unity.modules.particlesystem": "1.0.0",
+    "com.unity.modules.ui": "1.0.0",
+    "com.unity.modules.uielements": "1.0.0",
+    "com.unity.modules.unitywebrequest": "1.0.0",
+    "com.unity.modules.unitywebrequestassetbundle": "1.0.0",
+    "com.unity.modules.unitywebrequestaudio": "1.0.0",
+    "com.unity.modules.unitywebrequesttexture": "1.0.0",
+    "com.unity.modules.unitywebrequestwww": "1.0.0"
+  }
+}
