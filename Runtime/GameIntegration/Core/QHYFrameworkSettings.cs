@@ -70,8 +70,15 @@ namespace GameIntegration
         [Header("Startup")]
         public string startupSceneAddress = "Main";
         public HotUpdateAssemblySpec[] hotUpdateAssemblies = { new HotUpdateAssemblySpec() };
-        [Tooltip("例如 mscorlib.dll；构建工具会复制为同名 .bytes 地址。")]
+        [HideInInspector]
         public string[] aotMetadataAssemblyNames = Array.Empty<string>();
+        [Tooltip("仅用于补充 HybridCLR 自动分析结果；通常保持为空。")]
+        public string[] aotMetadataExtraAssemblyNames = Array.Empty<string>();
+        [HideInInspector] public string[] aotMetadataAutoAssemblyNames = Array.Empty<string>();
+        [HideInInspector] public string aotMetadataAnalysisTarget = "";
+        [HideInInspector] public string aotMetadataAnalysisHash = "";
+        [HideInInspector] public string aotMetadataAnalysisUtc = "";
+        [HideInInspector] public bool aotMetadataAutomationInitialized;
 
         public string LocalVersionKey =>
             $"GameIntegration.{Application.identifier}.{packageName}.{GetCurrentPlatform()}.LastGoodVersion";

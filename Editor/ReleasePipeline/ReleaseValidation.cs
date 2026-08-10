@@ -10,7 +10,7 @@ namespace GameIntegration.Editor
     public static class ReleaseValidation
     {
         public static IReadOnlyList<string> Validate(QHYFrameworkSettings settings, bool requireGeneratedFiles,
-            BuildTarget target = BuildTarget.NoTarget)
+            BuildTarget target = BuildTarget.NoTarget, IEnumerable<string> effectiveAotMetadata = null)
         {
             var errors = new List<string>();
             if (!settings)
@@ -77,7 +77,8 @@ namespace GameIntegration.Editor
                     if (!File.Exists(path)) errors.Add(F("缺少热更 DLL：{0}",
                         "Missing hot-update DLL: {0}", path));
                 }
-                foreach (string name in settings.aotMetadataAssemblyNames ?? Array.Empty<string>())
+                foreach (string name in effectiveAotMetadata ??
+                                        settings.aotMetadataAssemblyNames ?? Array.Empty<string>())
                 {
                     string fileName = name.EndsWith(".dll", StringComparison.OrdinalIgnoreCase) ? name : name + ".dll";
                     string path = $"{IntegrationProjectPaths.GeneratedAotMetadata}/{fileName}.bytes";
@@ -100,9 +101,9 @@ namespace GameIntegration.Editor
         }
 
         public static void ThrowIfInvalid(QHYFrameworkSettings settings, bool requireGeneratedFiles,
-            BuildTarget target = BuildTarget.NoTarget)
+            BuildTarget target = BuildTarget.NoTarget, IEnumerable<string> effectiveAotMetadata = null)
         {
-            IReadOnlyList<string> errors = Validate(settings, requireGeneratedFiles, target);
+            IReadOnlyList<string> errors = Validate(settings, requireGeneratedFiles, target, effectiveAotMetadata);
             if (errors.Count > 0)
                 throw new InvalidOperationException(L("发布校验失败：\n- ",
                     "Release validation failed:\n- ") + string.Join("\n- ", errors));

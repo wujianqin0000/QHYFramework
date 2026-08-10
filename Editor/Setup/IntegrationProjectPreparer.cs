@@ -154,7 +154,7 @@ namespace GameIntegration.Editor
             BundleCollectorSettingData.SaveFile();
         }
 
-        public static void CompileAndCopyHotUpdateAssemblies(QHYFrameworkSettings settings, BuildTarget target,
+        public static string[] CompileAndCopyHotUpdateAssemblies(QHYFrameworkSettings settings, BuildTarget target,
             bool developmentBuild, bool refreshAotMetadata = true)
         {
             CompileDllCommand.CompileDll(target, developmentBuild);
@@ -174,9 +174,10 @@ namespace GameIntegration.Editor
             // 纯热更新只刷新热更 DLL，保留 FullPackage 生成的元数据，避免本地 AOT 改动污染旧客户端热更包。
             if (!refreshAotMetadata)
             {
-                RestorePlatformAotMetadata(settings, target);
+                string[] snapshotAssemblies = AotMetadataSnapshotStore.Restore(target,
+                    Path.GetFullPath(AotOutput));
                 AssetDatabase.Refresh();
-                return;
+                return snapshotAssemblies;
             }
 
             RecreateGeneratedDirectory(AotOutput);
@@ -188,55 +189,10 @@ namespace GameIntegration.Editor
                 string fileName = name.EndsWith(".dll", StringComparison.OrdinalIgnoreCase) ? name : name + ".dll";
                 CopyAsBytes(Path.Combine(aotRoot, fileName), Path.Combine(AotOutput, fileName + ".bytes"), true);
             }
-            SavePlatformAotMetadata(settings, target);
+            AotMetadataSnapshotStore.Save(target, Path.GetFullPath(AotOutput),
+                settings.aotMetadataAssemblyNames, settings.aotMetadataAnalysisHash);
             AssetDatabase.Refresh();
-        }
-
-        private static void SavePlatformAotMetadata(QHYFrameworkSettings settings, BuildTarget target)
-        {
-            string snapshotRoot = GetAotSnapshotRoot(target);
-            if (Directory.Exists(snapshotRoot))
-                Directory.Delete(snapshotRoot, true);
-            Directory.CreateDirectory(snapshotRoot);
-            foreach (string name in settings.aotMetadataAssemblyNames ?? Array.Empty<string>())
-            {
-                if (string.IsNullOrWhiteSpace(name))
-                    continue;
-                string fileName = name.EndsWith(".dll", StringComparison.OrdinalIgnoreCase) ? name : name + ".dll";
-                CopyAsBytes(Path.Combine(AotOutput, fileName + ".bytes"),
-                    Path.Combine(snapshotRoot, fileName + ".bytes"), true);
-            }
-        }
-
-        private static void RestorePlatformAotMetadata(QHYFrameworkSettings settings, BuildTarget target)
-        {
-            string[] names = settings.aotMetadataAssemblyNames ?? Array.Empty<string>();
-            if (!names.Any(name => !string.IsNullOrWhiteSpace(name)))
-                return;
-
-            string snapshotRoot = GetAotSnapshotRoot(target);
-            if (!Directory.Exists(snapshotRoot))
-            {
-                throw new InvalidOperationException(F(
-                    "{0} 尚未生成对应客户端的 AOT 元数据快照。请先为该平台执行一次完整客户端构建。",
-                    "No client AOT metadata snapshot exists for {0}. Run Full Package Build for this platform first.",
-                    target));
-            }
-
-            RecreateGeneratedDirectory(AotOutput);
-            foreach (string name in names)
-            {
-                if (string.IsNullOrWhiteSpace(name))
-                    continue;
-                string fileName = name.EndsWith(".dll", StringComparison.OrdinalIgnoreCase) ? name : name + ".dll";
-                CopyAsBytes(Path.Combine(snapshotRoot, fileName + ".bytes"),
-                    Path.Combine(AotOutput, fileName + ".bytes"), true);
-            }
-        }
-
-        private static string GetAotSnapshotRoot(BuildTarget target)
-        {
-            return Path.GetFullPath(Path.Combine("Library", "GameIntegration", "AOTMetadata", target.ToString()));
+            return AotMetadataAutomation.Normalize(settings.aotMetadataAssemblyNames);
         }
 
         public static void BuildEditorSimulation(QHYFrameworkSettings settings)

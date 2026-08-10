@@ -33,6 +33,7 @@ namespace GameIntegration.Editor
         public string clientManifestUrl;
         public string timestampUtc;
         public string aotBaselineSha256;
+        public string[] aotMetadataAssemblies;
         public string[] artifacts;
     }
 }

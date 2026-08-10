@@ -112,15 +112,17 @@ namespace GameIntegration.Editor
                 }
                 // HybridCLR Generate/All 可能触发程序集重载，旧的 UnityEngine.Object 引用会失效。
                 settings = IntegrationProjectPreparer.LoadSettings();
+                AotMetadataAutomation.Synchronize(settings, options.target, true, true);
+                settings = IntegrationProjectPreparer.LoadSettings();
             }
-            IntegrationProjectPreparer.CompileAndCopyHotUpdateAssemblies(
+            string[] effectiveAotMetadata = IntegrationProjectPreparer.CompileAndCopyHotUpdateAssemblies(
                 settings, options.target, options.developmentBuild,
                 options.mode == ReleaseMode.FullPackage);
 
             // CompileDll 和 AssetDatabase.Refresh 后必须重新加载 ScriptableObject。
             settings = IntegrationProjectPreparer.LoadSettings();
             IntegrationProjectPreparer.ConfigureCollectors(settings);
-            ReleaseValidation.ThrowIfInvalid(settings, true, options.target);
+            ReleaseValidation.ThrowIfInvalid(settings, true, options.target, effectiveAotMetadata);
 
             string platform = GetPlatformName(options.target);
             string baseline = string.Empty;
@@ -179,6 +181,7 @@ namespace GameIntegration.Editor
                 clientManifestUrl = settings.GetClientManifestUrl(GetIntegrationPlatform(options.target)),
                 timestampUtc = DateTime.UtcNow.ToString("O"),
                 aotBaselineSha256 = baseline,
+                aotMetadataAssemblies = effectiveAotMetadata,
                 artifacts = artifacts
             };
             File.WriteAllText(Path.Combine(releaseRoot, "release-report.json"),
