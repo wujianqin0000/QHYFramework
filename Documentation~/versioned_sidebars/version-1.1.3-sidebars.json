@@ -1,0 +1,68 @@
+{
+  "tutorialSidebar": [
+    "intro",
+    {
+      "type": "category",
+      "label": "从零开始",
+      "items": [
+        "getting-started/requirements",
+        "getting-started/installation",
+        "getting-started/automatic-setup",
+        "getting-started/project-layout",
+        "getting-started/quick-start"
+      ]
+    },
+    {
+      "type": "category",
+      "label": "基础概念",
+      "items": [
+        "concepts/qframework",
+        "concepts/yooasset",
+        "concepts/hybridclr",
+        "concepts/qhy-workflows"
+      ]
+    },
+    {
+      "type": "category",
+      "label": "开发手册",
+      "items": [
+        "development/hot-update-code",
+        "development/resources",
+        "development/scenes",
+        "development/ui-audio",
+        "development/resource-lifetime"
+      ]
+    },
+    {
+      "type": "category",
+      "label": "发布与运维",
+      "items": [
+        "release/platforms-and-versions",
+        "release/choose-build",
+        "release/windows-android",
+        "release/ftp-cdn",
+        "release/client-update",
+        "release/cli-ci"
+      ]
+    },
+    {
+      "type": "category",
+      "label": "参考",
+      "items": [
+        "reference/settings",
+        "reference/runtime-api",
+        "reference/architecture",
+        "reference/glossary"
+      ]
+    },
+    {
+      "type": "category",
+      "label": "帮助",
+      "items": [
+        "help/troubleshooting",
+        "help/faq"
+      ]
+    },
+    "contributing/docs-maintenance"
+  ]
+}

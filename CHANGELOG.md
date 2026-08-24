@@ -2,6 +2,17 @@
 
 All notable changes to this package are documented here.
 
+## [1.1.3] - 2026-08-24
+
+- Fixed the dependency bootstrap incorrectly checking `il2cpp/il2cpp/bin` and treating a valid
+  HybridCLR 8.12 `build/deploy` installation as missing.
+- Protected full releases from `InitializeOnLoad` callbacks switching back to Unity's global
+  IL2CPP after HybridCLR generation or an asset refresh.
+- Reasserted and verified HybridCLR settings plus `UNITY_IL2CPP_PATH` immediately before
+  `BuildPipeline.BuildPlayer`, including package/local-runtime version consistency checks.
+- Added post-build interpreter-marker validation for Windows `GameAssembly.dll` and every Android
+  `libil2cpp.so` in APK/AAB output, preventing a stock-IL2CPP player from being published.
+
 ## [1.0.1] - 2026-07-21
 
 - Renamed the settings type, source file, Inspector and generated asset directly to

@@ -20,6 +20,7 @@ namespace WJQ.QHYFramework.Editor
         private const string DependencyDirectory = "Packages/QHYDependencies";
         private const string EmbeddedHybridClrDirectory = "Packages/com.code-philosophy.hybridclr";
         private const string SessionInstallingKey = "WJQ.QHYFramework.DependencyInstaller.Installing";
+        private const string ReleaseSessionKey = "WJQ.QHYFramework.HybridCLR.ReleaseInProgress";
 
         private static AddRequest _request;
         private static string _installingPackage;
@@ -193,6 +194,10 @@ namespace WJQ.QHYFramework.Editor
 
         private static void EnsureSafeIl2CppConfiguration()
         {
+            // ReleasePipeline owns the toolchain selection for the whole release session.
+            // Never let an InitializeOnLoad callback undo it after GenerateAll/Refresh.
+            if (SessionState.GetBool(ReleaseSessionKey, false))
+                return;
             if (HasInstalledLocalIl2Cpp())
                 return;
 
@@ -242,8 +247,21 @@ namespace WJQ.QHYFramework.Editor
 
             string localRoot = Path.GetFullPath(Path.Combine("HybridCLRData",
                 "LocalIl2CppData-" + editorPlatform, "il2cpp"));
-            return Directory.Exists(Path.Combine(localRoot, "libil2cpp", "hybridclr")) &&
-                   Directory.Exists(Path.Combine(localRoot, "il2cpp", "bin"));
+            if (!Directory.Exists(Path.Combine(localRoot, "libil2cpp", "hybridclr")))
+                return false;
+
+            // localRoot already ends in /il2cpp. HybridCLR 8.12 uses build/deploy;
+            // bin/il2cpp is retained for older supported Unity/HybridCLR layouts.
+            string[] compilerCandidates =
+            {
+                Path.Combine(localRoot, "build", "deploy", "il2cpp.exe"),
+                Path.Combine(localRoot, "build", "deploy", "il2cpp"),
+                Path.Combine(localRoot, "build", "deploy", "net471", "Unity.IL2CPP.dll"),
+                Path.Combine(localRoot, "build", "deploy", "il2cppcore", "Unity.IL2CPP.dll"),
+                Path.Combine(localRoot, "bin", "il2cpp.exe"),
+                Path.Combine(localRoot, "bin", "il2cpp")
+            };
+            return compilerCandidates.Any(File.Exists);
         }
 
         private static string L(string chinese, string english)

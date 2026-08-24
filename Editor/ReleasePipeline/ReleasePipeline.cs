@@ -83,6 +83,19 @@ namespace GameIntegration.Editor
     {
         public static string Run(ReleaseOptions options)
         {
+            SessionState.SetBool(HybridClrBuildGuard.ReleaseSessionKey, true);
+            try
+            {
+                return RunCore(options);
+            }
+            finally
+            {
+                SessionState.EraseBool(HybridClrBuildGuard.ReleaseSessionKey);
+            }
+        }
+
+        private static string RunCore(ReleaseOptions options)
+        {
             if (options == null) throw new ArgumentNullException(nameof(options));
             SynchronizePlayerVersion(options);
             ValidateOptions(options);
@@ -196,6 +209,8 @@ namespace GameIntegration.Editor
         {
             var installer = new InstallerController();
             bool requiresInstall = !installer.HasInstalledHybridCLR() ||
+                                   !HybridClrBuildGuard.IsLocalIl2CppLayoutValid(
+                                       SettingsUtil.LocalIl2CppDir, out _) ||
                                    !string.Equals(installer.PackageVersion,
                                        installer.InstalledLibil2cppVersion,
                                        StringComparison.Ordinal);
@@ -207,6 +222,8 @@ namespace GameIntegration.Editor
                 installer.InstallDefaultHybridCLR();
                 installer = new InstallerController();
                 if (!installer.HasInstalledHybridCLR() ||
+                    !HybridClrBuildGuard.IsLocalIl2CppLayoutValid(
+                        SettingsUtil.LocalIl2CppDir, out _) ||
                     !string.Equals(installer.PackageVersion, installer.InstalledLibil2cppVersion,
                         StringComparison.Ordinal))
                     throw new InvalidOperationException(L(
@@ -221,6 +238,7 @@ namespace GameIntegration.Editor
                 HybridCLR.Editor.Settings.HybridCLRSettings.Save();
             }
             Environment.SetEnvironmentVariable("UNITY_IL2CPP_PATH", SettingsUtil.LocalIl2CppDir);
+            HybridClrBuildGuard.EnsureInstalledAndVersionMatches();
         }
 
         private static YooAsset.Editor.BuildResult BuildYooAssetPackage(QHYFrameworkSettings settings,
@@ -299,10 +317,14 @@ namespace GameIntegration.Editor
                 locationPathName = location,
                 options = buildOptions
             };
+            // GenerateAll、CompileDll、AssetDatabase.Refresh 和 YooAsset 构建都可能触发
+            // InitializeOnLoad。必须在最终 BuildPlayer 紧邻位置重新锁定本地工具链。
+            HybridClrBuildGuard.ReassertLocalToolchain();
             UnityEditor.Build.Reporting.BuildReport report = BuildPipeline.BuildPlayer(playerOptions);
             if (report.summary.result != UnityEditor.Build.Reporting.BuildResult.Succeeded)
                 throw new InvalidOperationException(F("Player 构建失败：{0}，错误 {1}",
                     "Player build failed: {0}, errors: {1}", report.summary.result, report.summary.totalErrors));
+            HybridClrBuildGuard.ValidateNativePlayer(options.target, location);
             RemoveDoNotShipArtifacts(clientRoot);
         }
 
