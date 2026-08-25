@@ -39,7 +39,7 @@ namespace GameIntegration.Editor
             {
                 WindowsUpdaterBuilder.BuildAndCopy(clientRoot);
                 entry = PlayerSettings.productName + ".exe";
-                string name = $"Client_Windows64_{options.packageVersion}.zip";
+                string name = $"Client_Windows64_{options.clientVersion}.zip";
                 packagePath = Path.Combine(artifactRoot, name);
                 ZipFile.CreateFromDirectory(clientRoot, packagePath,
                     System.IO.Compression.CompressionLevel.Optimal, false);
@@ -51,7 +51,7 @@ namespace GameIntegration.Editor
                 if (string.IsNullOrWhiteSpace(apk))
                     throw new FileNotFoundException("Android 客户端目录中没有唯一的 APK。", clientRoot);
                 entry = string.Empty;
-                string name = $"Client_Android_{options.packageVersion}.apk";
+                string name = $"Client_Android_{options.clientVersion}.apk";
                 packagePath = Path.Combine(artifactRoot, name);
                 File.Copy(apk, packagePath, true);
                 packageType = "apk";
@@ -62,10 +62,10 @@ namespace GameIntegration.Editor
             {
                 SchemaVersion = 1,
                 Platform = platform.ToString(),
-                Version = options.packageVersion,
+                Version = options.clientVersion,
                 AndroidVersionCode = platform == IntegrationPlatform.Android
                     ? PlayerSettings.Android.bundleVersionCode : 0,
-                PackageUrl = $"{baseUrl.TrimEnd('/')}/{Uri.EscapeDataString(options.packageVersion)}/" +
+                PackageUrl = $"{baseUrl.TrimEnd('/')}/{Uri.EscapeDataString(options.clientVersion)}/" +
                              Uri.EscapeDataString(info.Name),
                 PackageType = packageType,
                 FileName = info.Name,

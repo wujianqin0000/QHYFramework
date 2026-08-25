@@ -5,6 +5,13 @@ using YooAsset;
 
 namespace GameIntegration
 {
+    public enum CollectorManagementMode
+    {
+        InitializeOnly,
+        ManagedGroupsOnly,
+        External
+    }
+
     [Serializable]
     public sealed class HotUpdateAssemblySpec
     {
@@ -53,18 +60,24 @@ namespace GameIntegration
         [Min(0)] public int downloadWatchdogTimeoutSeconds = 10;
         public bool copyBuiltinPackageManifest = true;
         public bool clearUnusedCacheAfterUpdate = true;
-        [Tooltip("HostPlayMode 联网成功后刷新缓存清单，允许同一个 PackageVersion 重复发布内容。不会清理已下载的 Bundle。")]
+        [Tooltip("HostPlayMode 每次启动请求远端 version 指针，以发现新的 ResourceVersion。不会清理仍被当前 Manifest 使用的 Bundle。")]
         public bool refreshHostManifestEveryStartup = true;
         public bool autoUnloadBundleWhenUnused;
 
+        [Header("Build Collection")]
+        [Tooltip("InitializeOnly 仅在 Package 不存在时初始化；ManagedGroupsOnly 只维护带 QHY 标记的组；External 仅校验项目配置。")]
+        public CollectorManagementMode collectorManagementMode = CollectorManagementMode.InitializeOnly;
+        [Min(0)] public int bundleWarningThresholdMiB = 4;
+        [Min(0)] public int bundleErrorThresholdMiB = 16;
+        [Tooltip("SBP 不支持 IgnoreTypeTreeChanges。该高级开关仅用于风险报告，默认关闭；启用前必须执行旧客户端兼容测试。")]
+        public bool ignoreTypeTreeChangesForIncrementalBuild;
+
 #if UNITY_EDITOR
-        // Editor-only publishing credentials. These are serialized in the host project's
-        // QHYFrameworkSettings asset but are not part of the Player-side class layout.
+        // Connection metadata may be shared. Secrets are intentionally never serialized.
         [Header("FTP Upload")]
         public string ftpHost = "";
         [Min(1)] public int ftpPort = 21;
         public string ftpUserName = "";
-        public string ftpPassword = "";
 #endif
 
         [Header("Startup")]
@@ -110,10 +123,10 @@ namespace GameIntegration
             return GetRemoteBaseUrl(GetCurrentPlatform());
         }
 
-        public string GetRemotePackageUrl(IntegrationPlatform platform, string resourceVersion)
+        public string GetRemotePackageUrl(IntegrationPlatform platform, string clientVersion)
         {
             string root = GetRemoteBaseUrl(platform).TrimEnd('/');
-            string version = resourceVersion?.Trim().Trim('/') ?? string.Empty;
+            string version = clientVersion?.Trim().Trim('/') ?? string.Empty;
             if (string.IsNullOrWhiteSpace(root) || string.IsNullOrWhiteSpace(version))
                 return string.Empty;
             return $"{root}/{Uri.EscapeDataString(version)}";

@@ -2,6 +2,54 @@
 
 All notable changes to this package are documented here.
 
+## [Unreleased]
+
+## [1.1.5] - 2026-08-25
+
+- Fixed Windows publication validation resolving `npm.cmd` relative to a `Documentation~` working
+  directory and incorrectly looking under `Documentation\\~`. The publisher now resolves absolute
+  Node/npm paths, invokes `npm-cli.js` through `node.exe`, and runs `npm ci` in clean publication
+  workspaces before documentation checks.
+- Fixed the QHYFrameworkDeveloper publisher window appearing blank on first open. The window now
+  paints immediately, displays a loading state, and defers lightweight package inspection until the
+  next Editor callback; full package and documentation validation only runs on explicit validation
+  or publication.
+
+- Aligned the framework-developer UPM publisher with release-time version selection. Development
+  keeps the last stable version unchanged and records changes under `Unreleased`/Next. At publish
+  time the tool promotes the changelog, updates README and version files, creates bilingual stable
+  snapshots, runs `npm run check`, publishes both remotes, and only then writes the version locally.
+
+- Stopped release builds from clearing the global YooAsset Collector configuration. Added
+  `InitializeOnly` (default), `ManagedGroupsOnly`, and `External` ownership modes, with stable
+  `QHYFramework.Managed:v2` collector markers and collision-safe legacy migration.
+- Replaced the directory-wide default packing policy with update-correlated defaults: root assets
+  and scenes are independent, nested UI/Common/Audio content groups by first-level feature folder,
+  and HotUpdate/AOT metadata use separate collector bundles.
+- Split immutable client versions (`v1.0.4`) from monotonically increasing resource versions
+  (`v1.0.4-r0007`). HotUpdateOnly now reads the published client baseline, never changes
+  `PlayerSettings.bundleVersion`, and refuses same-resource-version overwrite.
+- Added YooAsset build-report delta analysis, `upload-plan.json`, expanded `release-report.json`,
+  TypeTree suspicion diagnostics, and configurable 4 MiB warning / 16 MiB error bundle-size checks.
+- Made FTP publication incremental and content-address safe. Existing hashed bundles are verified by
+  length and SHA-256, matching files are skipped, collisions stop publication, and the upload dialog
+  separates snapshot, actual upload, and estimated client download sizes.
+- Published manifests safely by uploading bundles and audit files first, then replacing
+  `GamePackage.version` through an `.uploading` file with rollback backup. Added one-click rollback
+  to the previous resource version without deleting bundles.
+- Strengthened HotUpdateOnly AOT freezing with client-version-specific snapshots and per-file
+  SHA-256 verification. Any AOT metadata bundle change blocks the hot update.
+- Removed `ftpPassword` from `QHYFrameworkSettings`. Passwords now come from the current Editor
+  session or `QHY_FTP_PASSWORD`, are redacted from errors, cleared after upload/cancel/failure, and
+  scanned for project-file residue.
+
+## [1.1.4] - 2026-08-24
+
+- Added published-client AOT metadata snapshot restoration for HotUpdateOnly and versioned
+  bilingual documentation snapshots.
+- Preserved old-client compatibility when local AOT output changes while keeping the target client
+  baseline visible in release reports.
+
 ## [1.1.3] - 2026-08-24
 
 - Fixed the dependency bootstrap incorrectly checking `il2cpp/il2cpp/bin` and treating a valid

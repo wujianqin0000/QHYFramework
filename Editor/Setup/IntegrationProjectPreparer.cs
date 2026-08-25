@@ -16,6 +16,7 @@ namespace GameIntegration.Editor
 {
     public static class IntegrationProjectPreparer
     {
+        internal const string ManagedCollectorMarker = "QHYFramework.Managed:v2";
         private const string SettingsPath = QHYFrameworkSettings.DefaultAssetPath;
         private const string HotUpdateOutput = IntegrationProjectPaths.GeneratedHotUpdate;
         private const string AotOutput = IntegrationProjectPaths.GeneratedAotMetadata;
@@ -114,6 +115,14 @@ namespace GameIntegration.Editor
                 Debug.Log(F("[QHYFramework] 已创建宿主项目配置：{0}",
                     "[QHYFramework] Created host project settings: {0}", SettingsPath));
             }
+            else if (File.ReadLines(SettingsPath).Any(line =>
+                         line.TrimStart().StartsWith("ftpPassword:", StringComparison.Ordinal)))
+            {
+                // 1.1.4 and earlier serialized the FTP password. Re-serializing with the
+                // 1.1.5 type removes the orphaned YAML field without ever reading or logging it.
+                EditorUtility.SetDirty(settings);
+                AssetDatabase.SaveAssetIfDirty(settings);
+            }
             return settings;
         }
 
@@ -124,11 +133,37 @@ namespace GameIntegration.Editor
 
         public static void ConfigureCollectors(QHYFrameworkSettings settings)
         {
-            BundleCollectorSettingData.ClearAll();
             BundleCollectorSetting collectorSettings = BundleCollectorSettingData.Setting;
+            BundleCollectorPackage existing = collectorSettings.Packages.FirstOrDefault(package =>
+                string.Equals(package.PackageName, settings.packageName, StringComparison.Ordinal));
+            BundleCollectorPackage previousManagedPackage = collectorSettings.Packages.FirstOrDefault(package =>
+                package.Groups.Any(IsManagedGroup));
+            if (existing == null && previousManagedPackage != null)
+                throw new InvalidOperationException(F(
+                    "检测到 QHY 管理的 YooAsset Package 名称从 {0} 变为 {1}。为避免留下重复 Address，框架不会自动迁移；请先在 YooAsset Collector 窗口确认并迁移 Package。",
+                    "The QHY-managed YooAsset package name changed from {0} to {1}. Automatic migration is blocked to avoid duplicate addresses; confirm and migrate the package in the YooAsset Collector window.",
+                    previousManagedPackage.PackageName, settings.packageName));
+
+            if (settings.collectorManagementMode == CollectorManagementMode.External)
+            {
+                if (existing == null)
+                    throw new InvalidOperationException(F(
+                        "Collector 管理模式为 External，但找不到 YooAsset Package：{0}。请由项目创建并维护该 Package。",
+                        "Collector management mode is External, but YooAsset package '{0}' does not exist. Create and maintain it in the host project.",
+                        settings.packageName));
+                existing.CheckConfigError();
+                return;
+            }
+
+            if (existing != null && settings.collectorManagementMode == CollectorManagementMode.InitializeOnly)
+            {
+                existing.CheckConfigError();
+                return;
+            }
+
             collectorSettings.UniqueBundleName = true;
 
-            var package = new BundleCollectorPackage
+            BundleCollectorPackage package = existing ?? new BundleCollectorPackage
             {
                 PackageName = settings.packageName,
                 PackageDesc = "QFramework + HybridCLR + YooAsset game content",
@@ -139,23 +174,58 @@ namespace GameIntegration.Editor
                 AutoCollectShaders = true,
                 IgnoreRuleName = nameof(NormalIgnoreRule)
             };
+
+            if (existing != null)
+            {
+                string[] managedPaths =
+                {
+                    IntegrationProjectPaths.CommonContent, IntegrationProjectPaths.UIContent,
+                    IntegrationProjectPaths.AudioContent, IntegrationProjectPaths.SceneContent,
+                    HotUpdateOutput, AotOutput, UIRootPath
+                };
+                BundleCollector[] unmarkedConflicts = existing.Groups.SelectMany(group => group.Collectors)
+                    .Where(collector => !string.Equals(collector.UserData, ManagedCollectorMarker,
+                                            StringComparison.Ordinal) &&
+                                        managedPaths.Any(path => string.Equals(path, collector.CollectPath,
+                                            StringComparison.OrdinalIgnoreCase))).ToArray();
+                if (unmarkedConflicts.Length > 0)
+                    throw new InvalidOperationException(L(
+                        "ManagedGroupsOnly 检测到未带 QHYFramework.Managed:v2 标记的旧 Collector。为避免误删用户配置，框架不会自动接管；请在 YooAsset Collector 窗口确认这些 Collector 后添加标记，或继续使用 InitializeOnly/External。",
+                        "ManagedGroupsOnly found legacy collectors without the QHYFramework.Managed:v2 marker. They will not be adopted automatically. Confirm them in the YooAsset Collector window and add the marker, or keep InitializeOnly/External."));
+                package.Groups.RemoveAll(IsManagedGroup);
+            }
+            else
+            {
+                collectorSettings.Packages.Add(package);
+            }
+
             package.Groups.Add(CreateGroup("Common", "Common",
-                CreateCollector(IntegrationProjectPaths.CommonContent, nameof(CollectAll)),
-                CreateCollector(IntegrationProjectPaths.UIContent, nameof(CollectAll)),
-                CreateCollector(IntegrationProjectPaths.AudioContent, nameof(CollectAll)),
-                CreateCollector(UIRootPath, nameof(CollectAll))));
+                CreateCollector(IntegrationProjectPaths.CommonContent, nameof(CollectAll),
+                    nameof(QHYPackByTopDirectoryOrFile))));
+            package.Groups.Add(CreateGroup("UI", "UI",
+                CreateCollector(IntegrationProjectPaths.UIContent, nameof(CollectAll),
+                    nameof(QHYPackByTopDirectoryOrFile)),
+                CreateCollector(UIRootPath, nameof(CollectAll), nameof(PackCollector))));
+            package.Groups.Add(CreateGroup("Audio", "Audio",
+                CreateCollector(IntegrationProjectPaths.AudioContent, nameof(CollectAll),
+                    nameof(QHYPackByTopDirectoryOrFile))));
             package.Groups.Add(CreateGroup("Scene", "Scene",
-                CreateCollector(IntegrationProjectPaths.SceneContent, nameof(CollectScene))));
+                CreateCollector(IntegrationProjectPaths.SceneContent, nameof(CollectScene), nameof(PackSeparately))));
             package.Groups.Add(CreateGroup("HotUpdate", "HotUpdate",
-                CreateCollector(HotUpdateOutput, nameof(CollectAll))));
+                CreateCollector(HotUpdateOutput, nameof(CollectAll), nameof(PackCollector))));
             package.Groups.Add(CreateGroup("AOTMetadata", "AOTMetadata",
-                CreateCollector(AotOutput, nameof(CollectAll))));
-            collectorSettings.Packages.Add(package);
+                CreateCollector(AotOutput, nameof(CollectAll), nameof(PackCollector))));
             BundleCollectorSettingData.SaveFile();
         }
 
+        private static bool IsManagedGroup(BundleCollectorGroup group)
+        {
+            return group != null && group.Collectors.Count > 0 && group.Collectors.All(collector =>
+                string.Equals(collector.UserData, ManagedCollectorMarker, StringComparison.Ordinal));
+        }
+
         public static string[] CompileAndCopyHotUpdateAssemblies(QHYFrameworkSettings settings, BuildTarget target,
-            bool developmentBuild, bool refreshAotMetadata = true)
+            bool developmentBuild, bool refreshAotMetadata = true, string clientVersion = null)
         {
             CompileDllCommand.CompileDll(target, developmentBuild);
             string sourceRoot = SettingsUtil.GetHotUpdateDllsOutputDirByTarget(target);
@@ -174,8 +244,12 @@ namespace GameIntegration.Editor
             // 纯热更新只刷新热更 DLL，保留 FullPackage 生成的元数据，避免本地 AOT 改动污染旧客户端热更包。
             if (!refreshAotMetadata)
             {
+                string versionedSnapshot = AotMetadataSnapshotStore.GetRoot(target, clientVersion);
+                string snapshotRoot = Directory.Exists(versionedSnapshot)
+                    ? versionedSnapshot
+                    : AotMetadataSnapshotStore.GetRoot(target);
                 string[] snapshotAssemblies = AotMetadataSnapshotStore.Restore(target,
-                    Path.GetFullPath(AotOutput));
+                    Path.GetFullPath(AotOutput), snapshotRoot);
                 AssetDatabase.Refresh();
                 return snapshotAssemblies;
             }
@@ -190,7 +264,8 @@ namespace GameIntegration.Editor
                 CopyAsBytes(Path.Combine(aotRoot, fileName), Path.Combine(AotOutput, fileName + ".bytes"), true);
             }
             AotMetadataSnapshotStore.Save(target, Path.GetFullPath(AotOutput),
-                settings.aotMetadataAssemblyNames, settings.aotMetadataAnalysisHash);
+                settings.aotMetadataAssemblyNames, settings.aotMetadataAnalysisHash,
+                AotMetadataSnapshotStore.GetRoot(target, clientVersion));
             AssetDatabase.Refresh();
             return AotMetadataAutomation.Normalize(settings.aotMetadataAssemblyNames);
         }
@@ -249,7 +324,7 @@ namespace GameIntegration.Editor
             return group;
         }
 
-        private static BundleCollector CreateCollector(string path, string filterRule)
+        private static BundleCollector CreateCollector(string path, string filterRule, string packRule)
         {
             return new BundleCollector
             {
@@ -257,9 +332,9 @@ namespace GameIntegration.Editor
                 CollectorGUID = AssetDatabase.AssetPathToGUID(path),
                 CollectorType = ECollectorType.MainAssetCollector,
                 AddressRuleName = nameof(AddressByFileName),
-                PackRuleName = nameof(PackDirectory),
+                PackRuleName = packRule,
                 FilterRuleName = filterRule,
-                UserData = string.Empty,
+                UserData = ManagedCollectorMarker,
                 AssetTags = string.Empty
             };
         }

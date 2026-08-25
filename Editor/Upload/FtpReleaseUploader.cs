@@ -4,6 +4,7 @@ using System.IO;
 using System.IO.Compression;
 using System.Linq;
 using System.Net;
+using System.Security.Cryptography;
 using System.Threading;
 using System.Threading.Tasks;
 using UnityEngine;
@@ -54,7 +55,8 @@ namespace GameIntegration.Editor
         }
 
         public static async Task UploadAsync(string releaseRoot, FtpUploadOptions options,
-            bool includeClient, Action<FtpUploadProgress> onProgress, CancellationToken cancellationToken)
+            bool includeClient, Func<long, int, bool> onPrepared,
+            Action<FtpUploadProgress> onProgress, CancellationToken cancellationToken)
         {
             Validate(options);
             string cdnRoot = Path.Combine(releaseRoot, "CDN");
@@ -62,7 +64,18 @@ namespace GameIntegration.Editor
                 throw new DirectoryNotFoundException(F("找不到热更新包目录：{0}。请先执行构建。",
                     "Hot-update package directory not found: {0}. Build it first.", cdnRoot));
 
-            var items = CollectFiles(cdnRoot, options.HotUpdateDirectory, true);
+            string planPath = Path.Combine(releaseRoot, "upload-plan.json");
+            if (!File.Exists(planPath))
+                throw new FileNotFoundException(L("找不到增量上传计划，请重新构建。",
+                    "Incremental upload plan is missing. Rebuild the release."), planPath);
+            ReleaseUploadPlan plan = JsonUtility.FromJson<ReleaseUploadPlan>(File.ReadAllText(planPath));
+            if (plan == null || string.IsNullOrWhiteSpace(plan.resourceVersion))
+                throw new InvalidDataException("Invalid upload-plan.json.");
+            var items = await CollectPlannedFilesAsync(cdnRoot, options.HotUpdateDirectory, plan,
+                options, cancellationToken);
+            AddAuditFile(items, planPath, options.HotUpdateDirectory);
+            AddAuditFile(items, Path.Combine(releaseRoot, "release-report.json"), options.HotUpdateDirectory);
+            AddAuditFile(items, Path.Combine(releaseRoot, "artifacts.sha256"), options.HotUpdateDirectory);
             if (includeClient)
             {
                 string clientUpdateRoot = Path.Combine(releaseRoot, "ClientUpdate");
@@ -78,7 +91,13 @@ namespace GameIntegration.Editor
                 items.AddRange(CollectClientUpdateFiles(clientUpdateRoot, options.ClientDirectory, clientRoot));
             }
 
+            items = items.OrderBy(item => GetYooAssetUploadPriority(
+                    string.IsNullOrWhiteSpace(item.FinalRemotePath) ? item.RemotePath : item.FinalRemotePath))
+                .ThenBy(item => item.RemotePath, StringComparer.OrdinalIgnoreCase).ToList();
+
             long totalBytes = items.Sum(item => item.Length);
+            if (onPrepared != null && !onPrepared(totalBytes, items.Count))
+                throw new OperationCanceledException(cancellationToken);
             long uploadedBytes = 0;
             var createdDirectories = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             for (int index = 0; index < items.Count; index++)
@@ -99,6 +118,141 @@ namespace GameIntegration.Editor
                 onProgress?.Invoke(new FtpUploadProgress(Path.GetFileName(item.LocalPath), index + 1,
                     items.Count, uploadedBytes, totalBytes));
             }
+            ReleaseBaselineStore.SavePublished(releaseRoot, plan);
+            if (includeClient)
+                ReleaseBaselineStore.MarkClientPublished(releaseRoot, plan);
+        }
+
+        public static async Task RollbackAsync(string currentReleaseRoot, FtpUploadOptions options,
+            CancellationToken cancellationToken)
+        {
+            Validate(options);
+            string planPath = Path.Combine(currentReleaseRoot, "upload-plan.json");
+            if (!File.Exists(planPath)) throw new FileNotFoundException("upload-plan.json is missing.", planPath);
+            ReleaseUploadPlan current = JsonUtility.FromJson<ReleaseUploadPlan>(File.ReadAllText(planPath));
+            if (current == null || string.IsNullOrWhiteSpace(current.previousResourceVersion))
+                throw new InvalidOperationException(L("没有可回滚的上一资源版本。",
+                    "No previous resource version is available for rollback."));
+            string clientRoot = Directory.GetParent(currentReleaseRoot)?.FullName ?? string.Empty;
+            string previousRoot = Path.Combine(clientRoot, current.previousResourceVersion);
+            string versionName = Directory.GetFiles(Path.Combine(previousRoot, "CDN"), "*.version",
+                SearchOption.TopDirectoryOnly).Select(Path.GetFileName).Single();
+            string localVersion = Path.Combine(previousRoot, "CDN", versionName);
+            string finalRemote = CombineRemote(options.HotUpdateDirectory, versionName);
+            string temporary = finalRemote + ".uploading";
+            var item = new UploadItem
+            {
+                LocalPath = localVersion,
+                RemotePath = temporary,
+                FinalRemotePath = finalRemote,
+                Length = new FileInfo(localVersion).Length
+            };
+            var created = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            await EnsureDirectoryAsync(options, GetRemoteParent(temporary), created, cancellationToken);
+            await UploadFileAsync(options, item, null, cancellationToken);
+            await PublishLatestManifestAsync(options, temporary, finalRemote, cancellationToken);
+
+            string previousPlanPath = Path.Combine(previousRoot, "upload-plan.json");
+            if (File.Exists(previousPlanPath))
+            {
+                ReleaseUploadPlan previous = JsonUtility.FromJson<ReleaseUploadPlan>(
+                    File.ReadAllText(previousPlanPath));
+                if (previous != null) ReleaseBaselineStore.SaveRollback(previousRoot, previous,
+                    current.resourceVersion);
+            }
+        }
+
+        private static async Task<List<UploadItem>> CollectPlannedFilesAsync(string localRoot,
+            string remoteRoot, ReleaseUploadPlan plan, FtpUploadOptions options,
+            CancellationToken cancellationToken)
+        {
+            var result = new List<UploadItem>();
+            foreach (UploadArtifact artifact in (plan.added ?? Array.Empty<UploadArtifact>())
+                         .Concat(plan.changed ?? Array.Empty<UploadArtifact>()))
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                string localPath = Path.GetFullPath(Path.Combine(localRoot,
+                    artifact.relativePath.Replace('/', Path.DirectorySeparatorChar)));
+                string safeRoot = Path.GetFullPath(localRoot).TrimEnd(Path.DirectorySeparatorChar) +
+                                  Path.DirectorySeparatorChar;
+                if (!localPath.StartsWith(safeRoot, StringComparison.OrdinalIgnoreCase) || !File.Exists(localPath))
+                    throw new FileNotFoundException("Planned upload artifact is missing or unsafe.", localPath);
+                string remotePath = CombineRemote(remoteRoot, artifact.relativePath);
+                if (artifact.contentAddressedBundle &&
+                    await VerifyOrRejectExistingBundleAsync(options, remotePath, artifact,
+                        cancellationToken))
+                    continue;
+                bool versionPointer = Path.GetExtension(artifact.relativePath)
+                    .Equals(".version", StringComparison.OrdinalIgnoreCase);
+                result.Add(new UploadItem
+                {
+                    LocalPath = localPath,
+                    RemotePath = versionPointer ? remotePath + ".uploading" : remotePath,
+                    FinalRemotePath = versionPointer ? remotePath : string.Empty,
+                    Length = artifact.length
+                });
+            }
+            return result.OrderBy(item => GetYooAssetUploadPriority(item.FinalRemotePath.Length > 0
+                    ? item.FinalRemotePath
+                    : item.RemotePath))
+                .ThenBy(item => item.RemotePath, StringComparer.OrdinalIgnoreCase).ToList();
+        }
+
+        private static void AddAuditFile(List<UploadItem> items, string path, string remoteRoot)
+        {
+            if (!File.Exists(path)) return;
+            items.Add(new UploadItem
+            {
+                LocalPath = path,
+                RemotePath = CombineRemote(remoteRoot, Path.GetFileName(path)),
+                Length = new FileInfo(path).Length
+            });
+        }
+
+        private static async Task<bool> VerifyOrRejectExistingBundleAsync(FtpUploadOptions options,
+            string remotePath, UploadArtifact artifact, CancellationToken cancellationToken)
+        {
+            long remoteLength;
+            try
+            {
+                FtpWebRequest size = CreateRequest(options, remotePath, WebRequestMethods.Ftp.GetFileSize);
+                using FtpWebResponse response = (FtpWebResponse)await size.GetResponseAsync();
+                remoteLength = response.ContentLength;
+            }
+            catch (WebException exception) when (exception.Response is FtpWebResponse response &&
+                                                  response.StatusCode == FtpStatusCode.ActionNotTakenFileUnavailable)
+            {
+                return false;
+            }
+
+            if (remoteLength != artifact.length)
+                throw new InvalidDataException(
+                    $"Remote content-addressed bundle collision: {artifact.relativePath} has length {remoteLength}, expected {artifact.length}.");
+
+            string remoteSha = await ComputeRemoteSha256Async(options, remotePath, cancellationToken);
+            if (!string.Equals(remoteSha, artifact.sha256, StringComparison.OrdinalIgnoreCase))
+                throw new InvalidDataException(
+                    $"Remote content-addressed bundle collision: {artifact.relativePath} has a different SHA-256.");
+            return true;
+        }
+
+        private static async Task<string> ComputeRemoteSha256Async(FtpUploadOptions options, string path,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            FtpWebRequest request = CreateRequest(options, path, WebRequestMethods.Ftp.DownloadFile);
+            using FtpWebResponse response = (FtpWebResponse)await request.GetResponseAsync();
+            using Stream stream = response.GetResponseStream();
+            using SHA256 sha = SHA256.Create();
+            byte[] buffer = new byte[64 * 1024];
+            while (true)
+            {
+                int read = await stream.ReadAsync(buffer, 0, buffer.Length, cancellationToken);
+                if (read <= 0) break;
+                sha.TransformBlock(buffer, 0, read, buffer, 0);
+            }
+            sha.TransformFinalBlock(Array.Empty<byte>(), 0, 0);
+            return BitConverter.ToString(sha.Hash).Replace("-", string.Empty).ToLowerInvariant();
         }
 
         private static List<UploadItem> CollectClientUpdateFiles(string root, string versionDirectory,
@@ -158,22 +312,43 @@ namespace GameIntegration.Editor
             string finalPath, CancellationToken cancellationToken)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            string backup = finalPath + ".previous";
+            bool movedOld = false;
             try
-            {
-                await RenameAsync(options, temporary, finalPath);
-            }
-            catch (WebException)
             {
                 try
                 {
-                    FtpWebRequest delete = CreateRequest(options, finalPath, WebRequestMethods.Ftp.DeleteFile);
-                    using FtpWebResponse deleteResponse = (FtpWebResponse)await delete.GetResponseAsync();
+                    await DeleteIfExistsAsync(options, backup);
+                    await RenameAsync(options, finalPath, backup);
+                    movedOld = true;
                 }
                 catch (WebException exception) when (exception.Response is FtpWebResponse response &&
                                                       response.StatusCode == FtpStatusCode.ActionNotTakenFileUnavailable)
                 { }
                 await RenameAsync(options, temporary, finalPath);
+                if (movedOld) await DeleteIfExistsAsync(options, backup);
             }
+            catch
+            {
+                if (movedOld)
+                {
+                    await DeleteIfExistsAsync(options, finalPath);
+                    await RenameAsync(options, backup, finalPath);
+                }
+                throw;
+            }
+        }
+
+        private static async Task DeleteIfExistsAsync(FtpUploadOptions options, string path)
+        {
+            try
+            {
+                FtpWebRequest delete = CreateRequest(options, path, WebRequestMethods.Ftp.DeleteFile);
+                using FtpWebResponse response = (FtpWebResponse)await delete.GetResponseAsync();
+            }
+            catch (WebException exception) when (exception.Response is FtpWebResponse response &&
+                                                  response.StatusCode == FtpStatusCode.ActionNotTakenFileUnavailable)
+            { }
         }
 
         private static async Task RenameAsync(FtpUploadOptions options, string source, string destination)
@@ -311,11 +486,11 @@ namespace GameIntegration.Editor
             if (extension.Equals(".bytes", StringComparison.OrdinalIgnoreCase) ||
                 extension.Equals(".json", StringComparison.OrdinalIgnoreCase) ||
                 extension.Equals(".report", StringComparison.OrdinalIgnoreCase))
-                return 1;
-            if (extension.Equals(".version", StringComparison.OrdinalIgnoreCase))
-                return 2;
+                return extension.Equals(".report", StringComparison.OrdinalIgnoreCase) ? 3 : 1;
             if (extension.Equals(".hash", StringComparison.OrdinalIgnoreCase))
-                return 3;
+                return 2;
+            if (extension.Equals(".version", StringComparison.OrdinalIgnoreCase))
+                return 4;
             return 0;
         }
 

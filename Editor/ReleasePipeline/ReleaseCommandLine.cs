@@ -11,7 +11,9 @@ namespace GameIntegration.Editor
             var options = new ReleaseOptions
             {
                 channel = Read(args, "-releaseChannel", "default"),
-                packageVersion = Read(args, "-releaseVersion", PlayerSettings.bundleVersion),
+                clientVersion = Read(args, "-clientVersion",
+                    Read(args, "-releaseVersion", PlayerSettings.bundleVersion)),
+                resourceVersion = Read(args, "-resourceVersion", string.Empty),
                 outputRoot = Read(args, "-releaseOutput", "Releases"),
                 developmentBuild = bool.TryParse(Read(args, "-development", "false"), out bool development) && development
             };

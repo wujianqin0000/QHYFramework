@@ -140,6 +140,20 @@ namespace GameIntegration.Editor
             Draw("autoUnloadBundleWhenUnused", "自动卸载未使用 Bundle", "Auto Unload Unused Bundles");
 
             EditorGUILayout.Space(10);
+            EditorGUILayout.LabelField(L("资源收集与增量构建", "Collection and Incremental Build"),
+                EditorStyles.boldLabel);
+            Draw("collectorManagementMode", "Collector 管理模式", "Collector Management Mode");
+            Draw("bundleWarningThresholdMiB", "Bundle 警告阈值（MiB）", "Bundle Warning Threshold (MiB)");
+            Draw("bundleErrorThresholdMiB", "Bundle 错误阈值（MiB）", "Bundle Error Threshold (MiB)");
+            Draw("ignoreTypeTreeChangesForIncrementalBuild", "忽略 TypeTree 变化（高级）",
+                "Ignore TypeTree Changes (Advanced)");
+            if (serializedObject.FindProperty("ignoreTypeTreeChangesForIncrementalBuild").boolValue)
+                EditorGUILayout.HelpBox(L(
+                    "高风险选项：YooAsset 3.0.4 的 SBP 不支持直接忽略 TypeTree 变化，本选项只启用诊断标记。必须完成旧客户端加载新 Bundle 的兼容测试。",
+                    "High risk: YooAsset 3.0.4 SBP cannot directly ignore TypeTree changes. This option only enables diagnostics. Test old-client compatibility with new bundles."),
+                    MessageType.Warning);
+
+            EditorGUILayout.Space(10);
             EditorGUILayout.LabelField(L("启动与热更新", "Startup and Hot Update"), EditorStyles.boldLabel);
             Draw("startupSceneAddress", "首个业务场景地址", "Startup Scene Address");
             DrawAssemblySelection();
@@ -567,10 +581,10 @@ namespace GameIntegration.Editor
             Draw("ftpHost", "FTP 主机", "FTP Host");
             Draw("ftpPort", "FTP 端口", "FTP Port");
             Draw("ftpUserName", "FTP 用户名", "FTP Username");
-            SerializedProperty password = serializedObject.FindProperty("ftpPassword");
-            if (password != null)
-                password.stringValue = EditorGUILayout.PasswordField(new GUIContent(L("FTP 密码", "FTP Password")),
-                    password.stringValue);
+            EditorGUILayout.HelpBox(L(
+                "FTP 密码不会保存到项目资产。请在发布窗口临时输入，或通过 QHY_FTP_PASSWORD 环境变量注入。生产环境优先使用 FTPS、SFTP 或 HTTPS。",
+                "FTP passwords are never stored in project assets. Enter one for the current Release Window session or inject QHY_FTP_PASSWORD. Prefer FTPS, SFTP, or HTTPS in production."),
+                MessageType.Info);
         }
 
         private void Draw(string propertyName, string chinese, string english, bool includeChildren = false,

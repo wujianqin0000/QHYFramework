@@ -71,7 +71,44 @@ namespace GameIntegration.Tests.Editor
                 Assert.IsEmpty(settings.ftpHost);
                 Assert.AreEqual(21, settings.ftpPort);
                 Assert.IsEmpty(settings.ftpUserName);
-                Assert.IsEmpty(settings.ftpPassword);
+                Assert.IsNull(typeof(QHYFrameworkSettings).GetField("ftpPassword"));
+            }
+            finally
+            {
+                Object.DestroyImmediate(settings);
+            }
+        }
+
+        [Test]
+        public void ResourceVersion_IsIndependentAndMonotonic()
+        {
+            Assert.AreEqual("v1.2.3-r0001",
+                GameIntegration.Editor.ResourceVersionResolver.Next("v1.2.3", string.Empty));
+            Assert.AreEqual("v1.2.3-r0008",
+                GameIntegration.Editor.ResourceVersionResolver.Next("v1.2.3", "v1.2.3-r0007"));
+            Assert.Throws<System.FormatException>(() =>
+                GameIntegration.Editor.ResourceVersionResolver.Validate("v1.2.3", "v1.2.4-r0001"));
+            var options = new GameIntegration.Editor.ReleaseOptions
+            {
+                clientVersion = "v1.2.3",
+                resourceVersion = "v1.2.3-r0007",
+                mode = GameIntegration.Editor.ReleaseMode.FullPackage
+            };
+            Assert.Throws<System.InvalidOperationException>(() =>
+                GameIntegration.Editor.ResourceVersionResolver.Resolve(options, string.Empty,
+                    "v1.2.3-r0005", "v1.2.3-r0007"));
+        }
+
+        [Test]
+        public void CollectorManagement_DefaultsToInitializeOnly()
+        {
+            var settings = ScriptableObject.CreateInstance<QHYFrameworkSettings>();
+            try
+            {
+                Assert.AreEqual(CollectorManagementMode.InitializeOnly, settings.collectorManagementMode);
+                Assert.AreEqual(4, settings.bundleWarningThresholdMiB);
+                Assert.AreEqual(16, settings.bundleErrorThresholdMiB);
+                Assert.IsFalse(settings.ignoreTypeTreeChangesForIncrementalBuild);
             }
             finally
             {

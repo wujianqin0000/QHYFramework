@@ -25,13 +25,22 @@ namespace GameIntegration.Editor
     }
 
     [Serializable]
+    internal sealed class AotMetadataSnapshotFile
+    {
+        public string name;
+        public long length;
+        public string sha256;
+    }
+
+    [Serializable]
     internal sealed class AotMetadataSnapshotManifest
     {
-        public int schemaVersion = 1;
+        public int schemaVersion = 2;
         public string buildTarget;
         public string analysisHash;
         public string createdAtUtc;
         public string[] assemblies = Array.Empty<string>();
+        public AotMetadataSnapshotFile[] files = Array.Empty<AotMetadataSnapshotFile>();
     }
 
     internal static class AotMetadataAutomation
@@ -183,6 +192,15 @@ namespace GameIntegration.Editor
             return Path.GetFullPath(Path.Combine("Library", "GameIntegration", "AOTMetadata", target.ToString()));
         }
 
+        internal static string GetRoot(BuildTarget target, string clientVersion)
+        {
+            if (string.IsNullOrWhiteSpace(clientVersion)) return GetRoot(target);
+            string safe = new string(clientVersion.Select(character =>
+                Path.GetInvalidFileNameChars().Contains(character) ? '_' : character).ToArray());
+            return Path.GetFullPath(Path.Combine("Library", "GameIntegration", "AOTMetadata",
+                target.ToString(), safe));
+        }
+
         internal static void Save(BuildTarget target, string sourceRoot, IEnumerable<string> names,
             string analysisHash, string snapshotRoot = null)
         {
@@ -197,12 +215,24 @@ namespace GameIntegration.Editor
                     CopyRequired(Path.Combine(sourceRoot, name + ".bytes"),
                         Path.Combine(staging, name + ".bytes"));
 
+                AotMetadataSnapshotFile[] files = assemblies.Select(name =>
+                {
+                    string path = Path.Combine(staging, name + ".bytes");
+                    return new AotMetadataSnapshotFile
+                    {
+                        name = name,
+                        length = new FileInfo(path).Length,
+                        sha256 = ComputeSha256(path)
+                    };
+                }).ToArray();
+
                 var manifest = new AotMetadataSnapshotManifest
                 {
                     buildTarget = target.ToString(),
                     analysisHash = analysisHash ?? string.Empty,
                     createdAtUtc = DateTime.UtcNow.ToString("O"),
-                    assemblies = assemblies
+                    assemblies = assemblies,
+                    files = files
                 };
                 File.WriteAllText(Path.Combine(staging, ManifestFileName), JsonUtility.ToJson(manifest, true),
                     new UTF8Encoding(false));
@@ -242,10 +272,25 @@ namespace GameIntegration.Editor
             {
                 AotMetadataSnapshotManifest manifest =
                     JsonUtility.FromJson<AotMetadataSnapshotManifest>(File.ReadAllText(manifestPath));
-                if (manifest == null || manifest.schemaVersion != 1 ||
+                if (manifest == null || (manifest.schemaVersion != 1 && manifest.schemaVersion != 2) ||
                     !string.Equals(manifest.buildTarget, target.ToString(), StringComparison.Ordinal))
                     throw new InvalidDataException($"Invalid AOT metadata snapshot manifest: {manifestPath}");
                 names = AotMetadataAutomation.Normalize(manifest.assemblies);
+                if (manifest.schemaVersion == 2)
+                {
+                    var records = (manifest.files ?? Array.Empty<AotMetadataSnapshotFile>())
+                        .ToDictionary(item => item.name, StringComparer.OrdinalIgnoreCase);
+                    foreach (string name in names)
+                    {
+                        string source = Path.Combine(root, name + ".bytes");
+                        if (!records.TryGetValue(name, out AotMetadataSnapshotFile record) ||
+                            !File.Exists(source) || new FileInfo(source).Length != record.length ||
+                            !string.Equals(ComputeSha256(source), record.sha256,
+                                StringComparison.OrdinalIgnoreCase))
+                            throw new InvalidDataException(
+                                $"AOT metadata snapshot SHA-256 validation failed: {name}");
+                    }
+                }
             }
             else
             {
@@ -271,6 +316,13 @@ namespace GameIntegration.Editor
             if (!File.Exists(source))
                 throw new FileNotFoundException("AOT metadata snapshot file is missing.", source);
             File.Copy(source, destination, true);
+        }
+
+        private static string ComputeSha256(string path)
+        {
+            using var stream = File.OpenRead(path);
+            using SHA256 sha = SHA256.Create();
+            return BitConverter.ToString(sha.ComputeHash(stream)).Replace("-", string.Empty).ToLowerInvariant();
         }
     }
 

@@ -188,6 +188,22 @@ namespace GameIntegration.Tests.Editor
             Assert.IsTrue(File.Exists(Path.Combine(restored, "QFramework.CoreKit.dll.bytes")));
         }
 
+        [Test]
+        public void Snapshot_RejectsTamperedAotMetadataBySha256()
+        {
+            string generated = Path.Combine(_root, "GeneratedTamper");
+            string snapshot = Path.Combine(_root, "TamperSnapshot");
+            string restored = Path.Combine(_root, "TamperRestored");
+            Directory.CreateDirectory(generated);
+            File.WriteAllBytes(Path.Combine(generated, "mscorlib.dll.bytes"), new byte[] { 1, 2, 3 });
+            AotMetadataSnapshotStore.Save(BuildTarget.StandaloneWindows64, generated,
+                new[] { "mscorlib.dll" }, "analysis-hash", snapshot);
+            File.WriteAllBytes(Path.Combine(snapshot, "mscorlib.dll.bytes"), new byte[] { 9, 9, 9 });
+
+            Assert.Throws<InvalidDataException>(() => AotMetadataSnapshotStore.Restore(
+                BuildTarget.StandaloneWindows64, restored, snapshot));
+        }
+
         private void WriteReferences(params string[] names)
         {
             string entries = string.Join(Environment.NewLine, names.Select(name => $"\t\t\"{name}\","));
