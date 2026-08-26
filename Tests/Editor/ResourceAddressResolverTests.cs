@@ -204,6 +204,58 @@ namespace GameIntegration.Tests.Editor
                 BuildTarget.StandaloneWindows64, restored, snapshot));
         }
 
+        [Test]
+        public void SnapshotPayload_MatchingRestoredFilesAreAccepted()
+        {
+            string generated = Path.Combine(_root, "PayloadGenerated");
+            string snapshot = Path.Combine(_root, "PayloadSnapshot");
+            string restored = Path.Combine(_root, "PayloadRestored");
+            Directory.CreateDirectory(generated);
+            File.WriteAllBytes(Path.Combine(generated, "mscorlib.dll.bytes"), new byte[] { 1, 2, 3 });
+            AotMetadataSnapshotStore.Save(BuildTarget.Android, generated,
+                new[] { "mscorlib.dll" }, "analysis-hash", snapshot);
+            AotMetadataSnapshotStore.Restore(BuildTarget.Android, restored, snapshot);
+
+            Assert.IsTrue(AotMetadataSnapshotStore.MatchesSnapshot(BuildTarget.Android,
+                restored, snapshot, out string reason), reason);
+        }
+
+        [Test]
+        public void SnapshotPayload_ChangedFileIsRejected()
+        {
+            string generated = Path.Combine(_root, "ChangedGenerated");
+            string snapshot = Path.Combine(_root, "ChangedSnapshot");
+            string restored = Path.Combine(_root, "ChangedRestored");
+            Directory.CreateDirectory(generated);
+            File.WriteAllBytes(Path.Combine(generated, "mscorlib.dll.bytes"), new byte[] { 1, 2, 3 });
+            AotMetadataSnapshotStore.Save(BuildTarget.Android, generated,
+                new[] { "mscorlib.dll" }, "analysis-hash", snapshot);
+            AotMetadataSnapshotStore.Restore(BuildTarget.Android, restored, snapshot);
+            File.WriteAllBytes(Path.Combine(restored, "mscorlib.dll.bytes"), new byte[] { 1, 2, 4 });
+
+            Assert.IsFalse(AotMetadataSnapshotStore.MatchesSnapshot(BuildTarget.Android,
+                restored, snapshot, out string reason));
+            StringAssert.Contains("payload differs", reason);
+        }
+
+        [Test]
+        public void SnapshotPayload_ExtraAssemblyIsRejected()
+        {
+            string generated = Path.Combine(_root, "ExtraGenerated");
+            string snapshot = Path.Combine(_root, "ExtraSnapshot");
+            string restored = Path.Combine(_root, "ExtraRestored");
+            Directory.CreateDirectory(generated);
+            File.WriteAllBytes(Path.Combine(generated, "mscorlib.dll.bytes"), new byte[] { 1 });
+            AotMetadataSnapshotStore.Save(BuildTarget.Android, generated,
+                new[] { "mscorlib.dll" }, "analysis-hash", snapshot);
+            AotMetadataSnapshotStore.Restore(BuildTarget.Android, restored, snapshot);
+            File.WriteAllBytes(Path.Combine(restored, "System.dll.bytes"), new byte[] { 2 });
+
+            Assert.IsFalse(AotMetadataSnapshotStore.MatchesSnapshot(BuildTarget.Android,
+                restored, snapshot, out string reason));
+            StringAssert.Contains("assembly set differs", reason);
+        }
+
         private void WriteReferences(params string[] names)
         {
             string entries = string.Join(Environment.NewLine, names.Select(name => $"\t\t\"{name}\","));

@@ -2,12 +2,113 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using YooAsset;
 using YooAsset.Editor;
 
 namespace GameIntegration.Editor
 {
+    internal static class ReleaseSnapshotMaterializer
+    {
+        private const string SharedBundleDirectoryName = "SharedBundles";
+
+        internal static void Materialize(string sourceRoot, string cdnRoot, string clientVersionRoot,
+            string packageName, string resourceVersion)
+        {
+            if (!Directory.Exists(sourceRoot))
+                throw new DirectoryNotFoundException("YooAsset package output is missing: " + sourceRoot);
+
+            string reportPath = Path.Combine(sourceRoot,
+                YooAssetConfiguration.GetBuildReportFileName(packageName, resourceVersion));
+            if (!File.Exists(reportPath))
+                throw new FileNotFoundException("YooAsset build report is missing.", reportPath);
+
+            BuildReport report = BuildReport.Deserialize(File.ReadAllText(reportPath));
+            MaterializeFiles(sourceRoot, cdnRoot, clientVersionRoot,
+                (report?.BundleInfos ?? new List<ReportBundleInfo>()).Select(item => item.FileName));
+        }
+
+        internal static void MaterializeFiles(string sourceRoot, string cdnRoot, string clientVersionRoot,
+            IEnumerable<string> bundleFileNames)
+        {
+            var bundleFiles = new HashSet<string>(bundleFileNames ?? Array.Empty<string>(),
+                StringComparer.OrdinalIgnoreCase);
+            string sharedRoot = Path.Combine(clientVersionRoot, SharedBundleDirectoryName);
+            Directory.CreateDirectory(cdnRoot);
+
+            foreach (string source in Directory.GetFiles(sourceRoot, "*", SearchOption.AllDirectories))
+            {
+                string relative = source.Substring(sourceRoot.Length).TrimStart(
+                    Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+                string destination = Path.Combine(cdnRoot, relative);
+                Directory.CreateDirectory(Path.GetDirectoryName(destination) ?? cdnRoot);
+                if (!bundleFiles.Contains(Path.GetFileName(source)))
+                {
+                    File.Copy(source, destination, true);
+                    continue;
+                }
+
+                string shared = Path.Combine(sharedRoot, Path.GetFileName(source));
+                EnsureSharedBundle(source, shared);
+                if (!TryCreateHardLink(destination, shared))
+                    File.Copy(shared, destination, true);
+            }
+        }
+
+        private static void EnsureSharedBundle(string source, string shared)
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(shared) ?? throw new InvalidOperationException(
+                "Shared bundle directory is invalid."));
+            if (File.Exists(shared))
+            {
+                if (new FileInfo(source).Length != new FileInfo(shared).Length ||
+                    !string.Equals(BundleDeltaAnalyzer.ComputeSha256(source),
+                        BundleDeltaAnalyzer.ComputeSha256(shared), StringComparison.OrdinalIgnoreCase))
+                    throw new InvalidDataException(
+                        $"Shared content-addressed bundle collision: '{Path.GetFileName(shared)}'.");
+                return;
+            }
+
+            string temporary = shared + ".copying";
+            try
+            {
+                if (File.Exists(temporary)) File.Delete(temporary);
+                File.Copy(source, temporary, false);
+                File.Move(temporary, shared);
+            }
+            finally
+            {
+                if (File.Exists(temporary)) File.Delete(temporary);
+            }
+        }
+
+        private static bool TryCreateHardLink(string destination, string existing)
+        {
+            if (File.Exists(destination)) File.Delete(destination);
+            PlatformID platform = Environment.OSVersion.Platform;
+            if (platform != PlatformID.Win32NT && platform != PlatformID.Win32Windows)
+                return false;
+            try
+            {
+                return CreateHardLink(destination, existing, IntPtr.Zero);
+            }
+            catch (DllNotFoundException)
+            {
+                return false;
+            }
+            catch (EntryPointNotFoundException)
+            {
+                return false;
+            }
+        }
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool CreateHardLink(string newFileName, string existingFileName,
+            IntPtr securityAttributes);
+    }
+
     internal sealed class BundleDeltaAnalysis
     {
         public BuildReport CurrentReport;

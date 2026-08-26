@@ -158,9 +158,6 @@ namespace GameIntegration.Editor
             Draw("startupSceneAddress", "首个业务场景地址", "Startup Scene Address");
             DrawAssemblySelection();
 
-            EditorGUILayout.Space(10);
-            DrawFtpSettings();
-
             serializedObject.ApplyModifiedProperties();
         }
 
@@ -573,18 +570,6 @@ namespace GameIntegration.Editor
         private void OnLanguageChanged()
         {
             Repaint();
-        }
-
-        private void DrawFtpSettings()
-        {
-            EditorGUILayout.LabelField(L("FTP 上传", "FTP Upload"), EditorStyles.boldLabel);
-            Draw("ftpHost", "FTP 主机", "FTP Host");
-            Draw("ftpPort", "FTP 端口", "FTP Port");
-            Draw("ftpUserName", "FTP 用户名", "FTP Username");
-            EditorGUILayout.HelpBox(L(
-                "FTP 密码不会保存到项目资产。请在发布窗口临时输入，或通过 QHY_FTP_PASSWORD 环境变量注入。生产环境优先使用 FTPS、SFTP 或 HTTPS。",
-                "FTP passwords are never stored in project assets. Enter one for the current Release Window session or inject QHY_FTP_PASSWORD. Prefer FTPS, SFTP, or HTTPS in production."),
-                MessageType.Info);
         }
 
         private void Draw(string propertyName, string chinese, string english, bool includeChildren = false,

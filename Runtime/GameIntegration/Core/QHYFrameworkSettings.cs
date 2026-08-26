@@ -72,14 +72,6 @@ namespace GameIntegration
         [Tooltip("SBP 不支持 IgnoreTypeTreeChanges。该高级开关仅用于风险报告，默认关闭；启用前必须执行旧客户端兼容测试。")]
         public bool ignoreTypeTreeChangesForIncrementalBuild;
 
-#if UNITY_EDITOR
-        // Connection metadata may be shared. Secrets are intentionally never serialized.
-        [Header("FTP Upload")]
-        public string ftpHost = "";
-        [Min(1)] public int ftpPort = 21;
-        public string ftpUserName = "";
-#endif
-
         [Header("Startup")]
         public string startupSceneAddress = "Main";
         public HotUpdateAssemblySpec[] hotUpdateAssemblies = { new HotUpdateAssemblySpec() };

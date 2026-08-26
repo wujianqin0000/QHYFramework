@@ -311,6 +311,79 @@ namespace GameIntegration.Editor
             return names;
         }
 
+        internal static bool MatchesSnapshot(BuildTarget target, string generatedRoot,
+            string snapshotRoot, out string reason)
+        {
+            string root = snapshotRoot ?? GetRoot(target);
+            if (!Directory.Exists(root))
+            {
+                reason = $"AOT metadata snapshot does not exist: {root}";
+                return false;
+            }
+            if (!Directory.Exists(generatedRoot))
+            {
+                reason = $"Generated AOT metadata directory does not exist: {generatedRoot}";
+                return false;
+            }
+
+            string manifestPath = Path.Combine(root, ManifestFileName);
+            string[] expectedNames;
+            if (File.Exists(manifestPath))
+            {
+                AotMetadataSnapshotManifest manifest =
+                    JsonUtility.FromJson<AotMetadataSnapshotManifest>(File.ReadAllText(manifestPath));
+                if (manifest == null || (manifest.schemaVersion != 1 && manifest.schemaVersion != 2) ||
+                    !string.Equals(manifest.buildTarget, target.ToString(), StringComparison.Ordinal))
+                {
+                    reason = $"Invalid AOT metadata snapshot manifest: {manifestPath}";
+                    return false;
+                }
+                expectedNames = AotMetadataAutomation.Normalize(manifest.assemblies);
+            }
+            else
+            {
+                expectedNames = AotMetadataAutomation.Normalize(Directory.GetFiles(root,
+                        "*.dll.bytes", SearchOption.TopDirectoryOnly)
+                    .Select(path => Path.GetFileName(path).Substring(0,
+                        Path.GetFileName(path).Length - ".bytes".Length)));
+            }
+
+            string[] actualNames = AotMetadataAutomation.Normalize(Directory.GetFiles(generatedRoot,
+                    "*.dll.bytes", SearchOption.TopDirectoryOnly)
+                .Select(path => Path.GetFileName(path).Substring(0,
+                    Path.GetFileName(path).Length - ".bytes".Length)));
+            if (!expectedNames.SequenceEqual(actualNames, StringComparer.OrdinalIgnoreCase))
+            {
+                reason = "AOT metadata assembly set differs from the published client snapshot. " +
+                         $"Expected: [{string.Join(", ", expectedNames)}]; " +
+                         $"actual: [{string.Join(", ", actualNames)}].";
+                return false;
+            }
+
+            foreach (string name in expectedNames)
+            {
+                string snapshotFile = Path.Combine(root, name + ".bytes");
+                string generatedFile = Path.Combine(generatedRoot, name + ".bytes");
+                if (!File.Exists(snapshotFile) || !File.Exists(generatedFile))
+                {
+                    reason = $"AOT metadata file is missing: {name}.bytes";
+                    return false;
+                }
+                var snapshotInfo = new FileInfo(snapshotFile);
+                var generatedInfo = new FileInfo(generatedFile);
+                if (snapshotInfo.Length != generatedInfo.Length ||
+                    !string.Equals(ComputeSha256(snapshotFile), ComputeSha256(generatedFile),
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    reason = $"AOT metadata payload differs from the published client snapshot: {name}.bytes";
+                    return false;
+                }
+            }
+
+            reason = string.Empty;
+            return true;
+        }
+
         private static void CopyRequired(string source, string destination)
         {
             if (!File.Exists(source))

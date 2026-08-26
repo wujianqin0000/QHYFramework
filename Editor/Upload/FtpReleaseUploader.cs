@@ -5,6 +5,7 @@ using System.IO.Compression;
 using System.Linq;
 using System.Net;
 using System.Security.Cryptography;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using UnityEngine;
@@ -25,27 +26,40 @@ namespace GameIntegration.Editor
 
     internal readonly struct FtpUploadProgress
     {
+        public readonly string Stage;
         public readonly string FileName;
         public readonly int CompletedFiles;
         public readonly int TotalFiles;
         public readonly long UploadedBytes;
         public readonly long TotalBytes;
+        public readonly bool UseFileCountProgress;
 
         public FtpUploadProgress(string fileName, int completedFiles, int totalFiles,
-            long uploadedBytes, long totalBytes)
+            long uploadedBytes, long totalBytes, string stage = null, bool useFileCountProgress = false)
         {
+            Stage = string.IsNullOrWhiteSpace(stage) ? L("FTP 上传", "FTP Upload") : stage;
             FileName = fileName;
             CompletedFiles = completedFiles;
             TotalFiles = totalFiles;
             UploadedBytes = uploadedBytes;
             TotalBytes = totalBytes;
+            UseFileCountProgress = useFileCountProgress;
         }
 
-        public float Progress => TotalBytes <= 0 ? 1f : (float)UploadedBytes / TotalBytes;
+        public float Progress => UseFileCountProgress
+            ? (TotalFiles <= 0 ? 1f : (float)CompletedFiles / TotalFiles)
+            : (TotalBytes <= 0 ? 1f : (float)UploadedBytes / TotalBytes);
+
+        private static string L(string chinese, string english)
+        {
+            return EditorLocalization.Text(chinese, english);
+        }
     }
 
     internal static class FtpReleaseUploader
     {
+        private const string RemoteHashIndexFileName = ".qhy-bundle-hashes.json";
+
         private sealed class UploadItem
         {
             public string LocalPath;
@@ -54,11 +68,42 @@ namespace GameIntegration.Editor
             public string FinalRemotePath;
         }
 
+        [Serializable]
+        private sealed class BundleHashEntry
+        {
+            public string relativePath;
+            public long length;
+            public string sha256;
+        }
+
+        [Serializable]
+        private sealed class BundleHashIndex
+        {
+            public int schemaVersion = 1;
+            public string updatedUtc;
+            public BundleHashEntry[] entries = Array.Empty<BundleHashEntry>();
+        }
+
+        private sealed class HashIndexContext
+        {
+            public BundleHashIndex Index;
+            public Dictionary<string, BundleHashEntry> RemoteEntries;
+            public Dictionary<string, BundleHashEntry> CachedEntries;
+            public string CachePath;
+            public bool Changed;
+        }
+
+        private sealed class PreparedUpload
+        {
+            public List<UploadItem> Items;
+            public BundleHashIndex HashIndex;
+            public string CachePath;
+        }
+
         public static async Task UploadAsync(string releaseRoot, FtpUploadOptions options,
             bool includeClient, Func<long, int, bool> onPrepared,
             Action<FtpUploadProgress> onProgress, CancellationToken cancellationToken)
         {
-            Validate(options);
             string cdnRoot = Path.Combine(releaseRoot, "CDN");
             if (!Directory.Exists(cdnRoot))
                 throw new DirectoryNotFoundException(F("找不到热更新包目录：{0}。请先执行构建。",
@@ -71,11 +116,32 @@ namespace GameIntegration.Editor
             ReleaseUploadPlan plan = JsonUtility.FromJson<ReleaseUploadPlan>(File.ReadAllText(planPath));
             if (plan == null || string.IsNullOrWhiteSpace(plan.resourceVersion))
                 throw new InvalidDataException("Invalid upload-plan.json.");
-            var items = await CollectPlannedFilesAsync(cdnRoot, options.HotUpdateDirectory, plan,
-                options, cancellationToken);
-            AddAuditFile(items, planPath, options.HotUpdateDirectory);
-            AddAuditFile(items, Path.Combine(releaseRoot, "release-report.json"), options.HotUpdateDirectory);
-            AddAuditFile(items, Path.Combine(releaseRoot, "artifacts.sha256"), options.HotUpdateDirectory);
+            if (!includeClient && !ReleaseContentChangeDetector.HasChanges(plan))
+                throw new NoReleaseContentChangesException(L(
+                    "上传计划中没有热更 DLL 或 YooAsset 资源变化，已阻止空更新上传。",
+                    "The upload plan contains no hot-update DLL or YooAsset content changes. Empty update upload was blocked."));
+            bool resourceAlreadyPublished = ReleaseBaselineStore.IsAlreadyPublished(releaseRoot, plan);
+            bool clientAlreadyPublished = includeClient &&
+                                          ReleaseBaselineStore.IsClientAlreadyPublished(releaseRoot, plan);
+            if (resourceAlreadyPublished && (!includeClient || clientAlreadyPublished))
+                throw new ReleaseAlreadyPublishedException(F(
+                    "资源版本 {0} 已上传成功，不能重复发布。请先构建新的 ResourceVersion；若此前执行过回滚，可从回滚后的基线重新发布。",
+                    "Resource version {0} has already been uploaded successfully and cannot be published again. Build a new ResourceVersion first; a rolled-back baseline may be republished.",
+                    plan.resourceVersion));
+            Validate(options);
+            PreparedUpload prepared = null;
+            var items = new List<UploadItem>();
+            if (!resourceAlreadyPublished)
+            {
+                prepared = await CollectPlannedFilesAsync(releaseRoot, cdnRoot,
+                    options.HotUpdateDirectory, plan, options, onProgress, cancellationToken);
+                items.AddRange(prepared.Items);
+                AddAuditFile(items, planPath, options.HotUpdateDirectory);
+                AddAuditFile(items, Path.Combine(releaseRoot, "release-report.json"),
+                    options.HotUpdateDirectory);
+                AddAuditFile(items, Path.Combine(releaseRoot, "artifacts.sha256"),
+                    options.HotUpdateDirectory);
+            }
             if (includeClient)
             {
                 string clientUpdateRoot = Path.Combine(releaseRoot, "ClientUpdate");
@@ -118,26 +184,52 @@ namespace GameIntegration.Editor
                 onProgress?.Invoke(new FtpUploadProgress(Path.GetFileName(item.LocalPath), index + 1,
                     items.Count, uploadedBytes, totalBytes));
             }
-            ReleaseBaselineStore.SavePublished(releaseRoot, plan);
+            if (prepared != null)
+                SaveHashIndexCache(prepared.CachePath, prepared.HashIndex);
+            if (!resourceAlreadyPublished)
+                ReleaseBaselineStore.SavePublished(releaseRoot, plan);
             if (includeClient)
                 ReleaseBaselineStore.MarkClientPublished(releaseRoot, plan);
         }
 
-        public static async Task RollbackAsync(string currentReleaseRoot, FtpUploadOptions options,
-            CancellationToken cancellationToken)
+        public static async Task RollbackAsync(string targetReleaseRoot, FtpUploadOptions options,
+            Action<FtpUploadProgress> onProgress, CancellationToken cancellationToken)
         {
             Validate(options);
-            string planPath = Path.Combine(currentReleaseRoot, "upload-plan.json");
+            string planPath = Path.Combine(targetReleaseRoot, "upload-plan.json");
             if (!File.Exists(planPath)) throw new FileNotFoundException("upload-plan.json is missing.", planPath);
-            ReleaseUploadPlan current = JsonUtility.FromJson<ReleaseUploadPlan>(File.ReadAllText(planPath));
-            if (current == null || string.IsNullOrWhiteSpace(current.previousResourceVersion))
-                throw new InvalidOperationException(L("没有可回滚的上一资源版本。",
-                    "No previous resource version is available for rollback."));
-            string clientRoot = Directory.GetParent(currentReleaseRoot)?.FullName ?? string.Empty;
-            string previousRoot = Path.Combine(clientRoot, current.previousResourceVersion);
-            string versionName = Directory.GetFiles(Path.Combine(previousRoot, "CDN"), "*.version",
+            ReleaseUploadPlan target = JsonUtility.FromJson<ReleaseUploadPlan>(File.ReadAllText(planPath));
+            if (target == null || string.IsNullOrWhiteSpace(target.resourceVersion))
+                throw new InvalidDataException("Invalid rollback target upload-plan.json.");
+            ResourceReleaseBaseline baseline = ReleaseBaselineStore.LoadForRelease(targetReleaseRoot, target);
+            if (baseline == null || string.IsNullOrWhiteSpace(baseline.resourceVersion))
+                throw new InvalidOperationException(L("没有已发布资源基线，不能执行回滚。",
+                    "No published resource baseline exists; rollback is unavailable."));
+            if (string.Equals(baseline.resourceVersion, target.resourceVersion,
+                    StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException(F("资源版本 {0} 已经是当前远端版本。",
+                    "Resource version {0} is already the active remote version.", target.resourceVersion));
+            string highest = string.IsNullOrWhiteSpace(baseline.highestResourceVersion)
+                ? baseline.resourceVersion
+                : baseline.highestResourceVersion;
+            if (!ResourceVersionResolver.TryGetRevision(highest, target.clientVersion,
+                    out int highestRevision) ||
+                !ResourceVersionResolver.TryGetRevision(target.resourceVersion, target.clientVersion,
+                    out int targetRevision) || targetRevision > highestRevision)
+                throw new InvalidOperationException(F("资源版本 {0} 不在已发布历史范围内。",
+                    "Resource version {0} is outside the published history.", target.resourceVersion));
+
+            string cdnRoot = Path.Combine(targetReleaseRoot, "CDN");
+            string versionName = Directory.GetFiles(cdnRoot, "*.version",
                 SearchOption.TopDirectoryOnly).Select(Path.GetFileName).Single();
-            string localVersion = Path.Combine(previousRoot, "CDN", versionName);
+            string localVersion = Path.Combine(cdnRoot, versionName);
+            if (!string.Equals(File.ReadAllText(localVersion).Trim(), target.resourceVersion,
+                    StringComparison.OrdinalIgnoreCase))
+                throw new InvalidDataException(F("本地 version 指针与回滚目标 {0} 不一致。",
+                    "The local version pointer does not match rollback target {0}.",
+                    target.resourceVersion));
+            await ValidateRemoteRollbackTargetAsync(cdnRoot, target, options, onProgress,
+                cancellationToken);
             string finalRemote = CombineRemote(options.HotUpdateDirectory, versionName);
             string temporary = finalRemote + ".uploading";
             var item = new UploadItem
@@ -151,26 +243,95 @@ namespace GameIntegration.Editor
             await EnsureDirectoryAsync(options, GetRemoteParent(temporary), created, cancellationToken);
             await UploadFileAsync(options, item, null, cancellationToken);
             await PublishLatestManifestAsync(options, temporary, finalRemote, cancellationToken);
+            ReleaseBaselineStore.SaveRollback(targetReleaseRoot, target, highest);
+        }
 
-            string previousPlanPath = Path.Combine(previousRoot, "upload-plan.json");
-            if (File.Exists(previousPlanPath))
+        private static async Task ValidateRemoteRollbackTargetAsync(string cdnRoot, ReleaseUploadPlan plan,
+            FtpUploadOptions options, Action<FtpUploadProgress> onProgress,
+            CancellationToken cancellationToken)
+        {
+            HashIndexContext hashes = await LoadHashIndexAsync(options, options.HotUpdateDirectory,
+                onProgress, cancellationToken);
+            UploadArtifact[] artifacts = (plan.added ?? Array.Empty<UploadArtifact>())
+                .Concat(plan.changed ?? Array.Empty<UploadArtifact>())
+                .Concat(plan.unchanged ?? Array.Empty<UploadArtifact>())
+                .Where(item => item != null && !string.IsNullOrWhiteSpace(item.relativePath))
+                .GroupBy(item => item.relativePath, StringComparer.OrdinalIgnoreCase)
+                .Select(group => group.First()).ToArray();
+            if (!artifacts.Any(item => item.contentAddressedBundle) ||
+                !artifacts.Any(item => Path.GetExtension(item.relativePath)
+                    .Equals(".bytes", StringComparison.OrdinalIgnoreCase)))
+                throw new InvalidDataException(F("回滚目标 {0} 的上传计划不完整，缺少 Manifest 或 Bundle。",
+                    "Rollback target {0} has an incomplete upload plan with no manifest or Bundle.",
+                    plan.resourceVersion));
+            for (int index = 0; index < artifacts.Length; index++)
             {
-                ReleaseUploadPlan previous = JsonUtility.FromJson<ReleaseUploadPlan>(
-                    File.ReadAllText(previousPlanPath));
-                if (previous != null) ReleaseBaselineStore.SaveRollback(previousRoot, previous,
-                    current.resourceVersion);
+                UploadArtifact artifact = artifacts[index];
+                cancellationToken.ThrowIfCancellationRequested();
+                onProgress?.Invoke(new FtpUploadProgress(artifact.relativePath, index,
+                    artifacts.Length, 0, 0, L("验证远端回滚版本", "Validating Remote Rollback Target"),
+                    true));
+                string extension = Path.GetExtension(artifact.relativePath);
+                if (extension.Equals(".version", StringComparison.OrdinalIgnoreCase))
+                {
+                    ReportRollbackValidationProgress(onProgress, artifact, index + 1, artifacts.Length);
+                    continue;
+                }
+                string remotePath = CombineRemote(options.HotUpdateDirectory, artifact.relativePath);
+                if (artifact.contentAddressedBundle)
+                {
+                    if (!await VerifyOrRejectExistingBundleAsync(options, remotePath, artifact, hashes,
+                            cancellationToken))
+                        throw new FileNotFoundException(F("远端缺少回滚版本 {0} 所需的 Bundle：{1}",
+                            "Remote rollback target {0} is missing required Bundle: {1}",
+                            plan.resourceVersion, artifact.relativePath));
+                    ReportRollbackValidationProgress(onProgress, artifact, index + 1, artifacts.Length);
+                    continue;
+                }
+
+                if (!extension.Equals(".bytes", StringComparison.OrdinalIgnoreCase) &&
+                    !extension.Equals(".hash", StringComparison.OrdinalIgnoreCase))
+                {
+                    ReportRollbackValidationProgress(onProgress, artifact, index + 1, artifacts.Length);
+                    continue;
+                }
+                string localPath = Path.GetFullPath(Path.Combine(cdnRoot,
+                    artifact.relativePath.Replace('/', Path.DirectorySeparatorChar)));
+                string safeRoot = Path.GetFullPath(cdnRoot).TrimEnd(Path.DirectorySeparatorChar) +
+                                  Path.DirectorySeparatorChar;
+                if (!localPath.StartsWith(safeRoot, StringComparison.OrdinalIgnoreCase) ||
+                    !File.Exists(localPath))
+                    throw new FileNotFoundException("Rollback target artifact is missing or unsafe.", localPath);
+                string remoteSha = await ComputeRemoteSha256Async(options, remotePath, cancellationToken);
+                if (!string.Equals(remoteSha, artifact.sha256, StringComparison.OrdinalIgnoreCase))
+                    throw new InvalidDataException(F("远端回滚文件内容不匹配：{0}",
+                        "Remote rollback artifact content mismatch: {0}", artifact.relativePath));
+                ReportRollbackValidationProgress(onProgress, artifact, index + 1, artifacts.Length);
             }
         }
 
-        private static async Task<List<UploadItem>> CollectPlannedFilesAsync(string localRoot,
-            string remoteRoot, ReleaseUploadPlan plan, FtpUploadOptions options,
-            CancellationToken cancellationToken)
+        private static void ReportRollbackValidationProgress(Action<FtpUploadProgress> onProgress,
+            UploadArtifact artifact, int completed, int total)
+        {
+            onProgress?.Invoke(new FtpUploadProgress(artifact.relativePath, completed, total, 0, 0,
+                L("验证远端回滚版本", "Validating Remote Rollback Target"), true));
+        }
+
+        private static async Task<PreparedUpload> CollectPlannedFilesAsync(string releaseRoot,
+            string localRoot, string remoteRoot, ReleaseUploadPlan plan, FtpUploadOptions options,
+            Action<FtpUploadProgress> onProgress, CancellationToken cancellationToken)
         {
             var result = new List<UploadItem>();
-            foreach (UploadArtifact artifact in (plan.added ?? Array.Empty<UploadArtifact>())
-                         .Concat(plan.changed ?? Array.Empty<UploadArtifact>()))
+            HashIndexContext hashes = await LoadHashIndexAsync(options, remoteRoot, onProgress,
+                cancellationToken);
+            UploadArtifact[] planned = (plan.added ?? Array.Empty<UploadArtifact>())
+                .Concat(plan.changed ?? Array.Empty<UploadArtifact>()).ToArray();
+            for (int index = 0; index < planned.Length; index++)
             {
+                UploadArtifact artifact = planned[index];
                 cancellationToken.ThrowIfCancellationRequested();
+                onProgress?.Invoke(new FtpUploadProgress(artifact.relativePath, index,
+                    planned.Length, 0, 0, L("分析 FTP 远端文件", "Analyzing Remote FTP Files"), true));
                 string localPath = Path.GetFullPath(Path.Combine(localRoot,
                     artifact.relativePath.Replace('/', Path.DirectorySeparatorChar)));
                 string safeRoot = Path.GetFullPath(localRoot).TrimEnd(Path.DirectorySeparatorChar) +
@@ -179,9 +340,13 @@ namespace GameIntegration.Editor
                     throw new FileNotFoundException("Planned upload artifact is missing or unsafe.", localPath);
                 string remotePath = CombineRemote(remoteRoot, artifact.relativePath);
                 if (artifact.contentAddressedBundle &&
-                    await VerifyOrRejectExistingBundleAsync(options, remotePath, artifact,
+                    await VerifyOrRejectExistingBundleAsync(options, remotePath, artifact, hashes,
                         cancellationToken))
+                {
+                    onProgress?.Invoke(new FtpUploadProgress(artifact.relativePath, index + 1,
+                        planned.Length, 0, 0, L("分析 FTP 远端文件", "Analyzing Remote FTP Files"), true));
                     continue;
+                }
                 bool versionPointer = Path.GetExtension(artifact.relativePath)
                     .Equals(".version", StringComparison.OrdinalIgnoreCase);
                 result.Add(new UploadItem
@@ -191,11 +356,41 @@ namespace GameIntegration.Editor
                     FinalRemotePath = versionPointer ? remotePath : string.Empty,
                     Length = artifact.length
                 });
+                if (artifact.contentAddressedBundle)
+                {
+                    UpsertHashEntry(hashes.RemoteEntries, artifact);
+                    hashes.Changed = true;
+                }
+                onProgress?.Invoke(new FtpUploadProgress(artifact.relativePath, index + 1,
+                    planned.Length, 0, 0, L("分析 FTP 远端文件", "Analyzing Remote FTP Files"), true));
             }
-            return result.OrderBy(item => GetYooAssetUploadPriority(item.FinalRemotePath.Length > 0
-                    ? item.FinalRemotePath
-                    : item.RemotePath))
-                .ThenBy(item => item.RemotePath, StringComparer.OrdinalIgnoreCase).ToList();
+            hashes.Index.entries = hashes.RemoteEntries.Values
+                .OrderBy(entry => entry.relativePath, StringComparer.OrdinalIgnoreCase).ToArray();
+            hashes.Index.updatedUtc = DateTime.UtcNow.ToString("O");
+            if (hashes.Changed)
+            {
+                string localIndex = Path.Combine(releaseRoot, "ftp-bundle-hashes.json");
+                File.WriteAllText(localIndex, JsonUtility.ToJson(hashes.Index, true),
+                    new UTF8Encoding(false));
+                string finalRemote = CombineRemote(remoteRoot, RemoteHashIndexFileName);
+                result.Add(new UploadItem
+                {
+                    LocalPath = localIndex,
+                    RemotePath = finalRemote + ".uploading",
+                    FinalRemotePath = finalRemote,
+                    Length = new FileInfo(localIndex).Length
+                });
+            }
+
+            return new PreparedUpload
+            {
+                Items = result.OrderBy(item => GetYooAssetUploadPriority(item.FinalRemotePath.Length > 0
+                        ? item.FinalRemotePath
+                        : item.RemotePath))
+                    .ThenBy(item => item.RemotePath, StringComparer.OrdinalIgnoreCase).ToList(),
+                HashIndex = hashes.Index,
+                CachePath = hashes.CachePath
+            };
         }
 
         private static void AddAuditFile(List<UploadItem> items, string path, string remoteRoot)
@@ -210,7 +405,8 @@ namespace GameIntegration.Editor
         }
 
         private static async Task<bool> VerifyOrRejectExistingBundleAsync(FtpUploadOptions options,
-            string remotePath, UploadArtifact artifact, CancellationToken cancellationToken)
+            string remotePath, UploadArtifact artifact, HashIndexContext hashes,
+            CancellationToken cancellationToken)
         {
             long remoteLength;
             try
@@ -229,11 +425,141 @@ namespace GameIntegration.Editor
                 throw new InvalidDataException(
                     $"Remote content-addressed bundle collision: {artifact.relativePath} has length {remoteLength}, expected {artifact.length}.");
 
+            if (hashes.RemoteEntries.TryGetValue(artifact.relativePath, out BundleHashEntry indexed))
+            {
+                ValidateHashEntry(indexed, artifact, "remote hash index");
+                return true;
+            }
+
+            if (hashes.CachedEntries.TryGetValue(artifact.relativePath, out BundleHashEntry cached))
+            {
+                if (cached.length == artifact.length && string.Equals(cached.sha256, artifact.sha256,
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    UpsertHashEntry(hashes.RemoteEntries, artifact);
+                    hashes.Changed = true;
+                    return true;
+                }
+                hashes.CachedEntries.Remove(artifact.relativePath);
+            }
+
             string remoteSha = await ComputeRemoteSha256Async(options, remotePath, cancellationToken);
             if (!string.Equals(remoteSha, artifact.sha256, StringComparison.OrdinalIgnoreCase))
                 throw new InvalidDataException(
                     $"Remote content-addressed bundle collision: {artifact.relativePath} has a different SHA-256.");
+            UpsertHashEntry(hashes.RemoteEntries, artifact);
+            UpsertHashEntry(hashes.CachedEntries, artifact);
+            hashes.Changed = true;
+            SaveHashIndexCache(hashes.CachePath, new BundleHashIndex
+            {
+                updatedUtc = DateTime.UtcNow.ToString("O"),
+                entries = hashes.CachedEntries.Values.OrderBy(entry => entry.relativePath,
+                    StringComparer.OrdinalIgnoreCase).ToArray()
+            });
             return true;
+        }
+
+        private static async Task<HashIndexContext> LoadHashIndexAsync(FtpUploadOptions options,
+            string remoteRoot, Action<FtpUploadProgress> onProgress,
+            CancellationToken cancellationToken)
+        {
+            string cachePath = GetHashIndexCachePath(options, remoteRoot);
+            BundleHashIndex cached = LoadHashIndexFile(cachePath, false) ?? new BundleHashIndex();
+            BundleHashIndex remote = null;
+            onProgress?.Invoke(new FtpUploadProgress(RemoteHashIndexFileName, 0, 1, 0, 0,
+                L("下载远端哈希索引", "Downloading Remote Hash Index"), true));
+            try
+            {
+                string json = await DownloadTextAsync(options,
+                    CombineRemote(remoteRoot, RemoteHashIndexFileName), cancellationToken);
+                remote = JsonUtility.FromJson<BundleHashIndex>(json);
+                if (remote == null || remote.schemaVersion != 1)
+                    throw new InvalidDataException("The remote QHY bundle hash index is invalid or unsupported.");
+            }
+            catch (WebException exception) when (exception.Response is FtpWebResponse response &&
+                                                  response.StatusCode == FtpStatusCode.ActionNotTakenFileUnavailable)
+            {
+                remote = new BundleHashIndex();
+            }
+            onProgress?.Invoke(new FtpUploadProgress(RemoteHashIndexFileName, 1, 1, 0, 0,
+                L("下载远端哈希索引", "Downloading Remote Hash Index"), true));
+
+            return new HashIndexContext
+            {
+                Index = remote,
+                RemoteEntries = ToEntryMap(remote.entries),
+                CachedEntries = ToEntryMap(cached.entries),
+                CachePath = cachePath,
+                Changed = remote.entries == null || remote.entries.Length == 0
+            };
+        }
+
+        private static Dictionary<string, BundleHashEntry> ToEntryMap(IEnumerable<BundleHashEntry> entries)
+        {
+            return (entries ?? Array.Empty<BundleHashEntry>())
+                .Where(entry => entry != null && !string.IsNullOrWhiteSpace(entry.relativePath))
+                .GroupBy(entry => entry.relativePath, StringComparer.OrdinalIgnoreCase)
+                .ToDictionary(group => group.Key, group => group.Last(), StringComparer.OrdinalIgnoreCase);
+        }
+
+        private static void ValidateHashEntry(BundleHashEntry entry, UploadArtifact artifact, string source)
+        {
+            if (entry.length != artifact.length || !string.Equals(entry.sha256, artifact.sha256,
+                    StringComparison.OrdinalIgnoreCase))
+                throw new InvalidDataException($"Remote content-addressed bundle collision: " +
+                                               $"{artifact.relativePath} differs from the {source}.");
+        }
+
+        private static void UpsertHashEntry(IDictionary<string, BundleHashEntry> entries,
+            UploadArtifact artifact)
+        {
+            entries[artifact.relativePath] = new BundleHashEntry
+            {
+                relativePath = artifact.relativePath,
+                length = artifact.length,
+                sha256 = artifact.sha256
+            };
+        }
+
+        private static BundleHashIndex LoadHashIndexFile(string path, bool required)
+        {
+            try
+            {
+                if (!File.Exists(path)) return null;
+                BundleHashIndex value = JsonUtility.FromJson<BundleHashIndex>(File.ReadAllText(path));
+                return value != null && value.schemaVersion == 1 ? value : null;
+            }
+            catch when (!required)
+            {
+                return null;
+            }
+        }
+
+        private static string GetHashIndexCachePath(FtpUploadOptions options, string remoteRoot)
+        {
+            string identity = string.Join("|", options.EnableSsl, options.Host?.Trim().ToLowerInvariant(),
+                options.Port, options.UserName?.Trim().ToLowerInvariant(), remoteRoot?.Trim().ToLowerInvariant());
+            byte[] bytes;
+            using (SHA256 sha = SHA256.Create())
+                bytes = sha.ComputeHash(Encoding.UTF8.GetBytes(identity));
+            string key = BitConverter.ToString(bytes).Replace("-", string.Empty).ToLowerInvariant();
+            return Path.GetFullPath(Path.Combine("Library", "QHYFramework", "FtpVerificationCache",
+                key + ".json"));
+        }
+
+        private static void SaveHashIndexCache(string path, BundleHashIndex index)
+        {
+            if (index == null || string.IsNullOrWhiteSpace(path)) return;
+            try
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(path) ?? "Library");
+                File.WriteAllText(path, JsonUtility.ToJson(index, true), new UTF8Encoding(false));
+            }
+            catch (Exception exception)
+            {
+                Debug.LogWarning("[QHYFramework] Failed to update the local FTP verification cache: " +
+                                 exception.GetBaseException().Message);
+            }
         }
 
         private static async Task<string> ComputeRemoteSha256Async(FtpUploadOptions options, string path,
@@ -401,8 +727,13 @@ namespace GameIntegration.Editor
             }
 
             cancellationToken.ThrowIfCancellationRequested();
-            string version = new DirectoryInfo(releaseRoot).Name;
-            string platform = Directory.GetParent(releaseRoot)?.Name ?? "unknown";
+            var releaseDirectory = new DirectoryInfo(releaseRoot);
+            DirectoryInfo clientVersionDirectory = string.Equals(releaseDirectory.Parent?.Name, "Revisions",
+                StringComparison.OrdinalIgnoreCase)
+                ? releaseDirectory.Parent?.Parent
+                : releaseDirectory.Parent;
+            string version = clientVersionDirectory?.Name ?? releaseDirectory.Name;
+            string platform = clientVersionDirectory?.Parent?.Name ?? "unknown";
             string archiveName = $"Client_{SanitizeFileName(platform)}_{SanitizeFileName(version)}.zip";
             string archiveRoot = Path.Combine(releaseRoot, "Upload");
             string archivePath = Path.Combine(archiveRoot, archiveName);

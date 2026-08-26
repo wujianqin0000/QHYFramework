@@ -4,6 +4,61 @@ All notable changes to this package are documented here.
 
 ## [Unreleased]
 
+## [1.1.6] - 2026-08-26
+
+- Reorganized the Release window into clearer build, FTP upload, and online-resource recovery
+  sections. The ambiguous historical-revision rollback button is now a dedicated **Restore an
+  Online Resource Version (Rollback)** card that displays the active online version, explains when
+  to use it in plain language, and offers **Choose an Online Version to Restore…** with an action
+  tooltip and restore-oriented confirmation/result messages.
+- Replaced the one-step previous-revision rollback with a historical revision picker. Candidates
+  come from a persistent successful-publication ledger and include newer
+  revisions after a rollback so the rollback can be undone. Before atomically switching the remote
+  version pointer, QHY validates the target versioned manifest and every required remote Bundle via
+  the SHA-256 index (with legacy fallback), exposes cancellable progress, and rejects unuploaded or
+  incomplete targets. Legacy baselines without a ledger remain compatible through mandatory remote
+  verification.
+- Archived local resource revisions under
+  `Releases/<channel>/<platform>/<ClientVersion>/Revisions/<ResourceVersion>` instead of scattering
+  `-rNNNN` directories in the client-version root. Content-addressed bundles are stored once in the
+  sibling `SharedBundles` directory and represented in each immutable CDN snapshot by NTFS hard
+  links on Windows, with a safe normal-copy fallback. Existing legacy release directories and
+  published baselines remain readable.
+- Blocked empty HotUpdateOnly releases at the bundle-delta stage and blocked legacy empty upload
+  plans before FTP connection. A no-op build discards only its newly generated YooAsset/release
+  directories, reports **Nothing to Publish**, and does not consume an automatic resource revision.
+- Added cancellable per-file progress for the previously silent FTP remote length/SHA-256 analysis,
+  including an explicit first-run notice before network preflight.
+- Replaced repeated remote Bundle downloads with an atomic `.qhy-bundle-hashes.json` SHA-256 index
+  and a server/scope-specific verification cache under `Library/QHYFramework`. Legacy servers do a
+  one-time full verification only for index gaps; new bundles update the index before the version
+  pointer is published, retaining collision protection without repeated payload downloads.
+- Prevented a successfully published ResourceVersion from being uploaded again. The resource-only
+  button becomes disabled with an **Already Uploaded** explanation; the combined button can still
+  finish a pending client upload, then also disables. Interrupted attempts remain retryable, and a
+  resource version can be republished after an explicit rollback changes the active baseline.
+- Removed all FTP fields from `QHYFrameworkSettings` and its Inspector. Host, port, username, FTPS,
+  passive mode, and remote paths now belong only to the project/platform-scoped QHY Release window.
+  Passwords can be remembered in Windows Credential Manager, defaulting to enabled, while CI
+  environment variables retain priority and no credential is serialized into the project.
+- Unified client and resource version automation under the Release window's single **Automatic
+  Versioning** toggle. When enabled, Full Package client candidates and every ResourceVersion are
+  calculated automatically; it defaults to enabled for a new project/platform preference. When
+  disabled, both fields are manual. Automatic resource revisions
+  skip published baselines, local Release snapshots, and leftover immutable YooAsset outputs.
+- Added an explicit, one-shot **Force Publish** confirmation when HotUpdateOnly detects an actual
+  AOT metadata payload mismatch. The release continues in the same pipeline only after the user
+  accepts the runtime-compatibility warning; command-line builds remain blocked by default, and
+  `release-report.json` records both the override and mismatch reason.
+- Replaced the overly broad HotUpdateOnly AOT Metadata Bundle block with payload-level validation.
+  A changed bundle is now allowed when every restored metadata file name, length, and SHA-256 still
+  matches the published client snapshot; added, missing, or byte-changed metadata remains blocked.
+  Release reports distinguish bundle changes from payload matches.
+- Reduced dual-repository UPM publication to one shared staging preparation, one deterministic
+  `npm ci`, and one bilingual production documentation check. GitHub and Gitee now publish the same
+  validated staging tree instead of independently reinstalling roughly 1.2 GB of dependencies and
+  rebuilding the documentation. `npm ci` prefers the local cache and skips audit/funding requests.
+
 ## [1.1.5] - 2026-08-25
 
 - Fixed Windows publication validation resolving `npm.cmd` relative to a `Documentation~` working

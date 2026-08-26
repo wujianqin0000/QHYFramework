@@ -180,7 +180,8 @@ namespace GameIntegration.Editor
             string cdnRoot = Path.Combine(releaseRoot, "CDN");
             RecreateDirectory(cdnRoot);
             // IRemoteService 接收的是纯文件名，CDN 根目录必须直接包含 version、manifest 和 bundle。
-            CopyDirectory(yooResult.OutputPackageDirectory, cdnRoot);
+            ReleaseSnapshotMaterializer.Materialize(yooResult.OutputPackageDirectory, cdnRoot,
+                GetClientVersionRoot(options), settings.packageName, options.resourceVersion);
             BundleDeltaAnalysis delta = BundleDeltaAnalyzer.Analyze(cdnRoot, settings.packageName, options,
                 resourceBaseline);
             if (!settings.ignoreTypeTreeChangesForIncrementalBuild)
@@ -194,13 +195,74 @@ namespace GameIntegration.Editor
                     "[QHYFramework] 已启用 TypeTree 高级诊断。YooAsset 3.0.4 SBP 不支持直接忽略 TypeTree 变化；报告中的标记仅为启发式判断。",
                     "[QHYFramework] Advanced TypeTree diagnostics are enabled. YooAsset 3.0.4 SBP cannot ignore TypeTree changes directly; report flags are heuristic."));
             }
+            if (options.mode == ReleaseMode.HotUpdateOnly &&
+                !ReleaseContentChangeDetector.HasChanges(delta))
+            {
+                DiscardNoChangeOutput(yooResult.OutputPackageDirectory, releaseRoot, options.outputRoot);
+                throw new NoReleaseContentChangesException(L(
+                    "未检测到任何热更 DLL 或 YooAsset 资源变化，本次为空更新，已取消构建且不会生成可上传版本。",
+                    "No hot-update DLL or YooAsset content changes were detected. This empty update was canceled and no uploadable release was produced."));
+            }
             BundleSizeAnalyzer.Analyze(delta.CurrentReport, settings);
-            if (options.mode == ReleaseMode.HotUpdateOnly && delta.Changed.Concat(delta.Added).Any(record =>
-                    record.mainAssets.Any(path => path.IndexOf("/Generated/AOTMetadata/",
-                        StringComparison.OrdinalIgnoreCase) >= 0)))
-                throw new InvalidOperationException(L(
-                    "HotUpdateOnly 检测到 AOT Metadata Bundle 发生变化，已阻止发布。请建立新的 FullPackage 客户端基线。",
-                    "HotUpdateOnly changed the AOT Metadata bundle. Publishing is blocked; create a new FullPackage client baseline."));
+            bool aotMetadataBundleChanged = delta.Changed.Concat(delta.Added).Concat(delta.Removed).Any(record =>
+                record.mainAssets.Any(path => path.IndexOf("/Generated/AOTMetadata/",
+                    StringComparison.OrdinalIgnoreCase) >= 0));
+            bool aotMetadataPayloadMatched = options.mode != ReleaseMode.HotUpdateOnly;
+            bool aotMetadataForcePublished = false;
+            string aotMetadataMismatchReason = string.Empty;
+            if (options.mode == ReleaseMode.HotUpdateOnly)
+            {
+                string versionedSnapshot = AotMetadataSnapshotStore.GetRoot(options.target,
+                    options.clientVersion);
+                string snapshotRoot = Directory.Exists(versionedSnapshot)
+                    ? versionedSnapshot
+                    : AotMetadataSnapshotStore.GetRoot(options.target);
+                aotMetadataPayloadMatched = AotMetadataSnapshotStore.MatchesSnapshot(options.target,
+                    Path.GetFullPath(IntegrationProjectPaths.GeneratedAotMetadata), snapshotRoot,
+                    out string mismatchReason);
+                if (aotMetadataPayloadMatched)
+                {
+                    string[] currentAotAssets = delta.Added.Concat(delta.Changed)
+                        .Concat(delta.Unchanged)
+                        .SelectMany(record => record.mainAssets ?? Array.Empty<string>())
+                        .Where(path => path.IndexOf("/Generated/AOTMetadata/",
+                            StringComparison.OrdinalIgnoreCase) >= 0)
+                        .Select(path => Path.GetFileName(path.Replace('/', Path.DirectorySeparatorChar)))
+                        .ToArray();
+                    string[] missingCollectedAssets = effectiveAotMetadata
+                        .Select(name => name + ".bytes")
+                        .Where(fileName => !currentAotAssets.Contains(fileName,
+                            StringComparer.OrdinalIgnoreCase))
+                        .ToArray();
+                    if (missingCollectedAssets.Length > 0)
+                    {
+                        aotMetadataPayloadMatched = false;
+                        mismatchReason = "Restored AOT metadata is not collected by the current YooAsset manifest: " +
+                                         string.Join(", ", missingCollectedAssets);
+                    }
+                }
+                if (!aotMetadataPayloadMatched)
+                {
+                    aotMetadataMismatchReason = mismatchReason;
+                    aotMetadataForcePublished = options.confirmForceAotMetadataPublish?.Invoke(
+                        mismatchReason) == true;
+                    if (!aotMetadataForcePublished)
+                        throw new AotMetadataPublishBlockedException(F(
+                            "HotUpdateOnly 的 AOT 元数据负载与已发布客户端快照不一致，且未授权强制发布：{0}。请恢复客户端快照或建立新的 FullPackage 基线。",
+                            "The HotUpdateOnly AOT metadata payload differs from the published client snapshot and force publication was not authorized: {0}. Restore the client snapshot or create a new FullPackage baseline.",
+                            mismatchReason));
+
+                    Debug.LogError(F(
+                        "[QHYFramework] 用户已强制发布不匹配的 AOT 元数据。旧客户端不包含当前工程新增或变化的 AOT 原生代码，运行时可能出现 MissingMethodException、元数据加载失败或崩溃。差异：{0}",
+                        "[QHYFramework] The user force-published mismatched AOT metadata. Existing clients do not contain newly added or changed native AOT code and may encounter MissingMethodException, metadata loading failures, or crashes. Difference: {0}",
+                        mismatchReason));
+                }
+
+                if (aotMetadataBundleChanged)
+                    Debug.LogWarning(L(
+                        "[QHYFramework] AOT Metadata Bundle 发生变化，但其中所有元数据文件的名称、长度和 SHA-256 均与已发布客户端快照一致，因此允许继续发布。Bundle 变化可能来自打包布局或依赖变化；当前工程的 AOT 代码不会在旧客户端中生效。",
+                        "[QHYFramework] The AOT Metadata bundle changed, but every metadata file name, length, and SHA-256 still matches the published client snapshot, so publication is allowed. The bundle may have changed because of packing or dependency changes; local AOT code will not take effect in existing clients."));
+            }
             File.WriteAllText(Path.Combine(releaseRoot, "upload-plan.json"),
                 JsonUtility.ToJson(delta.UploadPlan, true), new UTF8Encoding(false));
 
@@ -247,9 +309,15 @@ namespace GameIntegration.Editor
                 removedBundleCount = delta.Removed.Length,
                 hotUpdateDllChanged = delta.Added.Concat(delta.Changed).Any(record => record.mainAssets.Any(path =>
                     path.IndexOf("/Generated/HotUpdate/", StringComparison.OrdinalIgnoreCase) >= 0)),
-                aotMetadataChanged = false,
+                aotMetadataChanged = options.mode == ReleaseMode.HotUpdateOnly &&
+                                     !aotMetadataPayloadMatched,
+                aotMetadataBundleChanged = aotMetadataBundleChanged,
+                aotMetadataPayloadMatched = aotMetadataPayloadMatched,
+                aotMetadataForcePublished = aotMetadataForcePublished,
+                aotMetadataMismatchReason = aotMetadataMismatchReason,
                 aotClientBaselineMatched = options.mode == ReleaseMode.FullPackage ||
-                                           !string.IsNullOrWhiteSpace(baseline),
+                                           (aotMetadataPayloadMatched &&
+                                            !string.IsNullOrWhiteSpace(baseline)),
                 addedBundles = delta.Added,
                 changedBundles = delta.Changed,
                 unchangedBundles = delta.Unchanged,
@@ -264,6 +332,34 @@ namespace GameIntegration.Editor
                 GamePackageRuntime.FormatBytes(delta.UploadPlan.uploadBytes),
                 GamePackageRuntime.FormatBytes(delta.UploadPlan.estimatedClientDownloadBytes)));
             return releaseRoot;
+        }
+
+        private static void DiscardNoChangeOutput(string yooOutput, string releaseRoot, string outputRoot)
+        {
+            TryDeleteGeneratedDirectory(yooOutput, BundleBuilderHelper.GetDefaultBuildOutputRoot());
+            TryDeleteGeneratedDirectory(releaseRoot, outputRoot);
+        }
+
+        private static void TryDeleteGeneratedDirectory(string path, string allowedRoot)
+        {
+            try
+            {
+                string fullPath = Path.GetFullPath(path).TrimEnd(Path.DirectorySeparatorChar,
+                    Path.AltDirectorySeparatorChar);
+                string fullRoot = Path.GetFullPath(allowedRoot).TrimEnd(Path.DirectorySeparatorChar,
+                    Path.AltDirectorySeparatorChar);
+                string prefix = fullRoot + Path.DirectorySeparatorChar;
+                if (!fullPath.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(fullPath, fullRoot, StringComparison.OrdinalIgnoreCase))
+                    throw new InvalidOperationException("Refused to delete a generated directory outside its root: " +
+                                                        fullPath);
+                if (Directory.Exists(fullPath)) Directory.Delete(fullPath, true);
+            }
+            catch (Exception exception)
+            {
+                Debug.LogWarning("[QHYFramework] Failed to discard empty release output: " +
+                                 exception.GetBaseException().Message);
+            }
         }
 
         private static void EnsureHybridClrInstalled()
@@ -329,6 +425,21 @@ namespace GameIntegration.Editor
                 WriteLinkXML = true,
                 BuiltinShadersBundleName = GetBuiltinShaderBundleName(settings.packageName)
             };
+            if (options.automaticResourceVersion)
+            {
+                string originalVersion = parameters.PackageVersion;
+                while (Directory.Exists(Path.GetFullPath(parameters.GetPackageOutputDirectory())))
+                {
+                    parameters.PackageVersion = ResourceVersionResolver.Next(options.clientVersion,
+                        parameters.PackageVersion);
+                    options.resourceVersion = parameters.PackageVersion;
+                }
+                if (!string.Equals(originalVersion, parameters.PackageVersion, StringComparison.Ordinal))
+                    Debug.Log(F(
+                        "[QHYFramework] 自动资源版本 {0} 已存在，已顺延为 {1}。",
+                        "[QHYFramework] Automatic resource version {0} already exists; advanced to {1}.",
+                        originalVersion, parameters.PackageVersion));
+            }
             ThrowIfResourceVersionExists(parameters);
             var pipeline = new ScriptableBuildPipeline();
             YooAsset.Editor.BuildResult result = pipeline.Run(parameters, true);
@@ -493,15 +604,6 @@ namespace GameIntegration.Editor
                 .TrimStart(Path.DirectorySeparatorChar).Replace('\\', '/')).ToArray();
         }
 
-        private static void CopyDirectory(string source, string destination)
-        {
-            Directory.CreateDirectory(destination);
-            foreach (string directory in Directory.GetDirectories(source, "*", SearchOption.AllDirectories))
-                Directory.CreateDirectory(directory.Replace(source, destination));
-            foreach (string file in Directory.GetFiles(source, "*", SearchOption.AllDirectories))
-                File.Copy(file, file.Replace(source, destination), true);
-        }
-
         private static void RecreateDirectory(string path)
         {
             string full = Path.GetFullPath(path);
@@ -632,8 +734,14 @@ namespace GameIntegration.Editor
         public static string GetReleaseRoot(ReleaseOptions options)
         {
             if (options == null) throw new ArgumentNullException(nameof(options));
+            return Path.Combine(GetClientVersionRoot(options), "Revisions", options.resourceVersion);
+        }
+
+        internal static string GetClientVersionRoot(ReleaseOptions options)
+        {
+            if (options == null) throw new ArgumentNullException(nameof(options));
             return Path.GetFullPath(Path.Combine(options.outputRoot, options.channel,
-                GetPlatformName(options.target), options.clientVersion, options.resourceVersion));
+                GetPlatformName(options.target), options.clientVersion));
         }
 
         public static IntegrationPlatform GetIntegrationPlatform(BuildTarget target)

@@ -16,7 +16,8 @@ namespace GameIntegration.Editor
         private CancellationTokenSource _uploadCancellation;
         private BuildTarget _lastTarget;
         private string _lastObservedPlayerVersion;
-        private bool _automaticVersioning;
+        private bool _automaticVersioning = true;
+        private bool _rememberFtpPassword = true;
         private bool _automaticVersionBuildInProgress;
 
         private const string FtpPrefsPrefix = "GameIntegration.ReleaseWindow.FTP.";
@@ -65,18 +66,39 @@ namespace GameIntegration.Editor
                 EditorLocalization.Language = (EditorToolLanguage)selectedLanguage;
 
             _options.channel = EditorGUILayout.TextField(L("发布渠道", "Channel"), _options.channel);
-            string editedVersion = EditorGUILayout.TextField(L("当前平台版本（Player Version）",
-                "Current Platform Version (Player Version)"), _options.clientVersion);
-            if (!string.Equals(editedVersion, _options.clientVersion, StringComparison.Ordinal))
-                SetPackageVersion(editedVersion);
-            _options.resourceVersion = EditorGUILayout.TextField(L("资源版本（例如 v1.0.0-r0002）",
-                "Resource Version (for example v1.0.0-r0002)"), _options.resourceVersion);
+            _automaticVersioning = EditorGUILayout.Toggle(
+                L("版本自动化", "Automatic Versioning"), _automaticVersioning);
+            _options.automaticResourceVersion = _automaticVersioning;
+            if (_automaticVersioning)
+            {
+                using (new EditorGUI.DisabledScope(true))
+                    EditorGUILayout.TextField(L("当前平台版本（自动基线）",
+                        "Current Platform Version (automatic baseline)"), _options.clientVersion);
+                string suggestedResourceVersion = ResourceVersionResolver.SuggestNext(_options);
+                using (new EditorGUI.DisabledScope(true))
+                    EditorGUILayout.TextField(L("热更新下一资源版本（自动）",
+                            "Next Hot-Update Resource Version (automatic)"),
+                        string.IsNullOrWhiteSpace(suggestedResourceVersion)
+                            ? L("等待有效客户端版本", "Waiting for a valid client version")
+                            : suggestedResourceVersion);
+                EditorGUILayout.HelpBox(L(
+                    "构建时会综合已发布基线、本地 Releases 产物和 YooAsset 遗留目录选择下一个可用的 -rNNNN，不覆盖旧版本。",
+                    "At build time QHY selects the next available -rNNNN from the published baseline, local Releases, and leftover YooAsset output without overwriting an old version."),
+                    MessageType.Info);
+            }
+            else
+            {
+                string editedVersion = EditorGUILayout.TextField(L("客户端版本（手动）",
+                    "Client Version (manual)"), _options.clientVersion);
+                if (!string.Equals(editedVersion, _options.clientVersion, StringComparison.Ordinal))
+                    SetPackageVersion(editedVersion);
+                _options.resourceVersion = EditorGUILayout.TextField(L("资源版本（例如 v1.0.0-r0002）",
+                    "Resource Version (for example v1.0.0-r0002)"), _options.resourceVersion);
+            }
             EditorGUILayout.HelpBox(L(
                 "HotUpdateOnly 会锁定已发布客户端版本，不修改 PlayerSettings；只允许递增资源版本。",
                 "HotUpdateOnly locks the published client version, does not modify PlayerSettings, and only advances ResourceVersion."),
                 MessageType.Info);
-            _automaticVersioning = EditorGUILayout.Toggle(
-                L("版本自动化", "Automatic Versioning"), _automaticVersioning);
             BuildTarget selectedTarget = (BuildTarget)EditorGUILayout.EnumPopup(
                 L("目标平台", "Build Target"), _options.target);
             if (selectedTarget != _options.target)
@@ -114,6 +136,12 @@ namespace GameIntegration.Editor
             }
 
             EditorGUILayout.Space(12);
+            EditorGUILayout.LabelField(L("构建发布包", "Build Release Packages"),
+                EditorStyles.boldLabel);
+            EditorGUILayout.HelpBox(L(
+                "完整客户端构建用于发布新客户端；仅热更新构建用于更新代码和资源。",
+                "Full Package Build publishes a new client; HotUpdateOnly Build updates code and content."),
+                MessageType.None);
             if (_automaticVersioning)
                 DrawAutomatedFullPackageButtons();
             else if (GUILayout.Button(L("完整客户端构建", "Full Package Build"), GUILayout.Height(42)))
@@ -123,12 +151,17 @@ namespace GameIntegration.Editor
 
             EditorGUILayout.Space(18);
             EditorGUILayout.LabelField(L("FTP 上传", "FTP Upload"), EditorStyles.boldLabel);
-            SynchronizeFtpConnectionFromSettings(settings);
             ApplyRemoteUrlDefaults();
             _ftp.Host = EditorGUILayout.TextField(L("FTP 主机", "FTP Host"), _ftp.Host);
             _ftp.Port = EditorGUILayout.IntField(L("FTP 端口", "FTP Port"), _ftp.Port);
             _ftp.UserName = EditorGUILayout.TextField(L("FTP 用户名", "FTP User Name"), _ftp.UserName);
             _ftp.Password = EditorGUILayout.PasswordField(L("FTP 密码", "FTP Password"), _ftp.Password);
+            _rememberFtpPassword = EditorGUILayout.Toggle(
+                L("安全记住 FTP 密码", "Remember FTP Password Securely"), _rememberFtpPassword);
+            EditorGUILayout.HelpBox(L(
+                "密码保存在 Windows 凭据管理器，不会写入工程、Settings Asset 或普通 EditorPrefs。取消勾选会删除已保存凭据。",
+                "The password is stored in Windows Credential Manager, never in project files, Settings assets, or regular EditorPrefs. Clearing this option removes the saved credential."),
+                MessageType.None);
             using (new EditorGUI.DisabledScope(true))
             {
                 _ftp.HotUpdateDirectory = EditorGUILayout.TextField(
@@ -142,25 +175,94 @@ namespace GameIntegration.Editor
             _ftp.EnableSsl = EditorGUILayout.Toggle(L("启用 SSL（FTPS）", "Enable SSL (FTPS)"),
                 _ftp.EnableSsl);
 
-            using (new EditorGUI.DisabledScope(_uploading))
+            GetCurrentPublicationState(out bool resourcePublished, out bool clientPublished);
+            using (new EditorGUI.DisabledScope(_uploading || resourcePublished))
             {
                 if (GUILayout.Button(L("上传热更新包", "Upload Hot Update Package"), GUILayout.Height(36)))
                     Upload(false);
+            }
+            using (new EditorGUI.DisabledScope(_uploading || (resourcePublished && clientPublished)))
+            {
                 if (GUILayout.Button(L("上传热更新包和客户端包", "Upload Hot Update + Client Package"),
                         GUILayout.Height(36)))
                     Upload(true);
-                if (GUILayout.Button(L("回滚到上一资源版本", "Rollback to Previous Resource Version"),
-                        GUILayout.Height(30)))
-                    Rollback();
             }
+            if (resourcePublished)
+                EditorGUILayout.HelpBox(L(
+                    clientPublished
+                        ? $"资源版本 {_options.resourceVersion} 已上传成功，不能重复上传。请构建新版本；回滚后可重新发布。"
+                        : $"资源版本 {_options.resourceVersion} 已上传；仍可用第二个按钮补传尚未发布的客户端包。",
+                    clientPublished
+                        ? $"Resource version {_options.resourceVersion} was uploaded successfully and cannot be uploaded twice. Build a new version; it may be republished after rollback."
+                        : $"Resource version {_options.resourceVersion} is uploaded; the second button can still publish the pending client package."),
+                    MessageType.Info);
             DrawUploadPlanSummary();
-            SaveFtpConnectionToSettings(settings);
+            DrawResourceRestoreSection();
+            SaveFtpSettings(_options.target);
             EditorGUILayout.EndScrollView();
+        }
+
+        private void DrawResourceRestoreSection()
+        {
+            EditorGUILayout.Space(16);
+            EditorGUILayout.BeginVertical(EditorStyles.helpBox);
+            EditorGUILayout.LabelField(L("线上资源版本恢复（回滚）",
+                "Restore an Online Resource Version (Rollback)"), EditorStyles.boldLabel);
+            ResourceReleaseBaseline baseline = null;
+            try { baseline = ReleaseBaselineStore.Load(_options); }
+            catch { }
+            string activeVersion = string.IsNullOrWhiteSpace(baseline?.resourceVersion)
+                ? L("尚未记录已发布版本", "No published version recorded")
+                : baseline.resourceVersion;
+            using (new EditorGUI.DisabledScope(true))
+                EditorGUILayout.TextField(L("当前线上生效版本", "Active Online Version"),
+                    activeVersion);
+            EditorGUILayout.HelpBox(L(
+                "当新热更新出现问题时，可将线上资源恢复到任意一个此前上传成功的版本。恢复前会验证远端文件完整性，不会删除 Bundle。",
+                "If a hot update has a problem, restore online resources to any previously uploaded version. Remote files are verified first and no Bundles are deleted."),
+                MessageType.Info);
+            using (new EditorGUI.DisabledScope(_uploading || baseline == null))
+            {
+                var label = new GUIContent(L("选择要恢复的线上资源版本…",
+                        "Choose an Online Version to Restore…"),
+                    L("查看已上传的历史版本，并选择一个版本恢复为当前线上版本。",
+                        "View uploaded versions and restore one as the active online version."));
+                if (GUILayout.Button(label, GUILayout.Height(36)))
+                    ShowRollbackMenu();
+            }
+            EditorGUILayout.EndVertical();
+        }
+
+        private void GetCurrentPublicationState(out bool resourcePublished, out bool clientPublished)
+        {
+            resourcePublished = false;
+            clientPublished = false;
+            if (string.IsNullOrWhiteSpace(_options.resourceVersion)) return;
+            try
+            {
+                string releaseRoot = ReleasePipeline.GetReleaseRoot(_options);
+                string planPath = Path.Combine(releaseRoot, "upload-plan.json");
+                if (!File.Exists(planPath)) return;
+                ReleaseUploadPlan plan = JsonUtility.FromJson<ReleaseUploadPlan>(File.ReadAllText(planPath));
+                resourcePublished = ReleaseBaselineStore.IsAlreadyPublished(releaseRoot, plan);
+                clientPublished = ReleaseBaselineStore.IsClientAlreadyPublished(releaseRoot, plan);
+            }
+            catch
+            {
+                resourcePublished = false;
+                clientPublished = false;
+            }
         }
 
         private bool Build(ReleaseMode mode, bool saveSettingsBeforeBuild = true)
         {
             _options.mode = mode;
+            _options.automaticResourceVersion = _automaticVersioning;
+            if (_automaticVersioning)
+                _options.resourceVersion = string.Empty;
+            _options.confirmForceAotMetadataPublish = mode == ReleaseMode.HotUpdateOnly
+                ? ConfirmForceAotMetadataPublish
+                : null;
             if (saveSettingsBeforeBuild)
                 SaveReleaseSettings(_options.target);
             try
@@ -172,6 +274,20 @@ namespace GameIntegration.Editor
                 SaveReleaseSettings(_options.target);
                 return true;
             }
+            catch (AotMetadataPublishBlockedException exception)
+            {
+                Debug.LogWarning(exception.Message);
+                return false;
+            }
+            catch (NoReleaseContentChangesException exception)
+            {
+                if (_automaticVersioning)
+                    _options.resourceVersion = string.Empty;
+                Debug.Log("[QHYFramework] " + exception.Message);
+                EditorUtility.DisplayDialog(L("无需发布", "Nothing to Publish"),
+                    exception.Message, L("确定", "OK"));
+                return false;
+            }
             catch (Exception exception)
             {
                 Debug.LogException(exception);
@@ -179,6 +295,27 @@ namespace GameIntegration.Editor
                     exception.Message, L("确定", "OK"));
                 return false;
             }
+            finally
+            {
+                // Authorization applies to this single build attempt only and is never saved.
+                _options.confirmForceAotMetadataPublish = null;
+            }
+        }
+
+        private bool ConfirmForceAotMetadataPublish(string mismatchReason)
+        {
+            return EditorUtility.DisplayDialog(
+                L("检测到 AOT 元数据变化", "AOT metadata changes detected"),
+                string.Format(L(
+                    "HotUpdateOnly 生成的 AOT 元数据与 {0} 客户端快照不一致：\n\n{1}\n\n" +
+                    "强制发布不会把新的 AOT 原生代码注入旧客户端。若热更代码调用旧客户端不存在或签名已变化的 AOT API，可能出现 MissingMethodException、元数据加载失败或崩溃。\n\n" +
+                    "建议取消并执行 Full Package。若你已经确认这次 AOT 变化不影响旧客户端，可强制继续；该决定和差异原因会写入 release-report.json。",
+                    "The generated HotUpdateOnly AOT metadata differs from the {0} client snapshot:\n\n{1}\n\n" +
+                    "Force publication does not inject new native AOT code into existing clients. If hot-update code calls an AOT API that is absent or has a changed signature, clients may encounter MissingMethodException, metadata loading failures, or crashes.\n\n" +
+                    "Cancel and run Full Package is recommended. Continue only after confirming that this AOT change is safe for existing clients; the decision and reason are recorded in release-report.json."),
+                    _options.clientVersion, mismatchReason),
+                L("强制发布", "Force Publish"),
+                L("取消发布", "Cancel Release"));
         }
 
         private void DrawAutomatedFullPackageButtons()
@@ -216,13 +353,26 @@ namespace GameIntegration.Editor
         {
             bool valid = !string.IsNullOrWhiteSpace(targetVersion);
             string versionLabel = valid
-                ? targetVersion
+                ? targetVersion + " / " + SuggestResourceVersion(targetVersion)
                 : unavailableReason ?? L("已达到版本上限", "version limit reached");
             using (new EditorGUI.DisabledScope(!valid))
             {
                 if (GUILayout.Button($"{label} ({versionLabel})", GUILayout.Height(42)))
                     BuildFullPackageWithVersion(targetVersion);
             }
+        }
+
+        private string SuggestResourceVersion(string clientVersion)
+        {
+            var preview = new ReleaseOptions
+            {
+                channel = _options.channel,
+                clientVersion = clientVersion,
+                target = _options.target,
+                outputRoot = _options.outputRoot,
+                automaticResourceVersion = true
+            };
+            return ResourceVersionResolver.SuggestNext(preview);
         }
 
         private void BuildFullPackageWithVersion(string targetVersion)
@@ -272,10 +422,15 @@ namespace GameIntegration.Editor
                 if (includeClient)
                     ReleasePipeline.ValidateClientUpload(_options);
                 string releaseRoot = ReleasePipeline.GetReleaseRoot(_options);
+                if (EditorUtility.DisplayCancelableProgressBar(L("准备 FTP 上传", "Preparing FTP Upload"),
+                    L("正在读取上传计划并分析远端文件，首次分析可能需要较长时间…",
+                        "Reading the upload plan and analyzing remote files. The first analysis can take some time…"),
+                    0f))
+                    _uploadCancellation.Cancel();
                 await FtpReleaseUploader.UploadAsync(releaseRoot, _ftp, includeClient,
                     (actualBytes, actualFiles) => ConfirmUpload(releaseRoot, actualBytes, actualFiles), progress =>
                 {
-                    bool cancel = EditorUtility.DisplayCancelableProgressBar(L("FTP 上传", "FTP Upload"),
+                    bool cancel = EditorUtility.DisplayCancelableProgressBar(progress.Stage,
                         $"{progress.CompletedFiles}/{progress.TotalFiles}  {progress.FileName}", progress.Progress);
                     if (cancel)
                         _uploadCancellation.Cancel();
@@ -291,6 +446,18 @@ namespace GameIntegration.Editor
                 Debug.LogWarning(L("[QHYFramework] FTP 上传已取消。",
                     "[QHYFramework] FTP upload canceled."));
             }
+            catch (NoReleaseContentChangesException exception)
+            {
+                Debug.Log("[QHYFramework] " + exception.Message);
+                EditorUtility.DisplayDialog(L("无需上传", "Nothing to Upload"),
+                    exception.Message, L("确定", "OK"));
+            }
+            catch (ReleaseAlreadyPublishedException exception)
+            {
+                Debug.Log("[QHYFramework] " + exception.Message);
+                EditorUtility.DisplayDialog(L("已经上传", "Already Uploaded"),
+                    exception.Message, L("确定", "OK"));
+            }
             catch (Exception exception)
             {
                 string safeMessage = PublishingCredentialStore.Redact(
@@ -303,7 +470,9 @@ namespace GameIntegration.Editor
             {
                 string password = _ftp.Password;
                 PublishingCredentialStore.Clear(GetCredentialScope(_options.target));
-                _ftp.Password = string.Empty;
+                _ftp.Password = _rememberFtpPassword
+                    ? PublishingCredentialStore.GetPassword(GetCredentialScope(_options.target))
+                    : string.Empty;
                 try { PublishingCredentialStore.ThrowIfSecretPersisted(password); }
                 catch (Exception securityException)
                 {
@@ -317,50 +486,88 @@ namespace GameIntegration.Editor
             }
         }
 
-        private async void Rollback()
+        private void ShowRollbackMenu()
         {
             if (_uploading) return;
-            string releaseRoot = ReleasePipeline.GetReleaseRoot(_options);
-            string planPath = Path.Combine(releaseRoot, "upload-plan.json");
-            if (!File.Exists(planPath))
+            ReleaseRollbackTarget[] targets;
+            try
             {
-                EditorUtility.DisplayDialog(L("无法回滚", "Cannot Roll Back"),
-                    L("当前资源版本没有上传计划。", "The current resource version has no upload plan."),
+                targets = ReleaseBaselineStore.GetRollbackTargets(_options);
+            }
+            catch (Exception exception)
+            {
+                EditorUtility.DisplayDialog(L("无法恢复线上资源版本", "Cannot Restore Online Version"),
+                    exception.GetBaseException().Message,
                     L("确定", "OK"));
                 return;
             }
-            ReleaseUploadPlan plan = JsonUtility.FromJson<ReleaseUploadPlan>(File.ReadAllText(planPath));
-            if (plan == null || string.IsNullOrWhiteSpace(plan.previousResourceVersion))
+            if (targets.Length == 0)
             {
-                EditorUtility.DisplayDialog(L("无法回滚", "Cannot Roll Back"),
-                    L("没有可用的上一资源版本。", "No previous resource version is available."),
+                EditorUtility.DisplayDialog(L("无法恢复线上资源版本", "Cannot Restore Online Version"),
+                    L("没有其他已发布且本地完整的历史资源版本。",
+                        "No other published and locally complete resource revision is available."),
                     L("确定", "OK"));
                 return;
             }
-            if (!EditorUtility.DisplayDialog(L("确认资源回滚", "Confirm Resource Rollback"),
-                    L($"仅切换远端 version 指针到 {plan.previousResourceVersion}，不会删除 Bundle。",
-                        $"Only the remote version pointer will switch to {plan.previousResourceVersion}; bundles will not be deleted."),
-                    L("回滚", "Roll Back"), L("取消", "Cancel")))
+
+            ResourceReleaseBaseline baseline = ReleaseBaselineStore.Load(_options);
+            var menu = new GenericMenu();
+            menu.AddDisabledItem(new GUIContent(L($"当前线上版本：{baseline.resourceVersion}",
+                $"Active online version: {baseline.resourceVersion}")));
+            menu.AddSeparator(string.Empty);
+            foreach (ReleaseRollbackTarget target in targets)
+            {
+                ReleaseRollbackTarget captured = target;
+                menu.AddItem(new GUIContent(captured.ResourceVersion), false,
+                    () => Rollback(captured));
+            }
+            menu.ShowAsContext();
+        }
+
+        private async void Rollback(ReleaseRollbackTarget target)
+        {
+            if (_uploading || target == null) return;
+            if (!EditorUtility.DisplayDialog(L("确认恢复线上资源版本", "Confirm Online Version Restore"),
+                    L($"将先验证远端完整性，再把 version 指针切换到 {target.ResourceVersion}。不会删除任何 Bundle。",
+                        $"Remote completeness will be verified before switching the version pointer to {target.ResourceVersion}. No bundles will be deleted."),
+                    L("开始恢复", "Restore"), L("取消", "Cancel")))
                 return;
 
+            SaveFtpSettings(_options.target);
             _uploading = true;
             _uploadCancellation = new CancellationTokenSource();
             try
             {
-                await FtpReleaseUploader.RollbackAsync(releaseRoot, _ftp, _uploadCancellation.Token);
-                EditorUtility.DisplayDialog(L("回滚完成", "Rollback Completed"),
-                    plan.previousResourceVersion, L("确定", "OK"));
+                await FtpReleaseUploader.RollbackAsync(target.ReleaseRoot, _ftp, progress =>
+                {
+                    bool cancel = EditorUtility.DisplayCancelableProgressBar(progress.Stage,
+                        $"{progress.CompletedFiles}/{progress.TotalFiles}  {progress.FileName}",
+                        progress.Progress);
+                    if (cancel) _uploadCancellation.Cancel();
+                }, _uploadCancellation.Token);
+                EditorUtility.DisplayDialog(L("线上资源版本已恢复", "Online Version Restored"),
+                    L($"当前线上资源版本：{target.ResourceVersion}",
+                        $"Active online resource version: {target.ResourceVersion}"),
+                    L("确定", "OK"));
+            }
+            catch (OperationCanceledException)
+            {
+                Debug.LogWarning(L("[QHYFramework] 资源回滚已取消。",
+                    "[QHYFramework] Resource rollback canceled."));
             }
             catch (Exception exception)
             {
                 string safe = PublishingCredentialStore.Redact(exception.GetBaseException().Message, _ftp.Password);
                 Debug.LogError("[QHYFramework] Rollback failed: " + safe);
-                EditorUtility.DisplayDialog(L("回滚失败", "Rollback Failed"), safe, L("确定", "OK"));
+                EditorUtility.DisplayDialog(L("恢复线上资源版本失败", "Online Version Restore Failed"),
+                    safe, L("确定", "OK"));
             }
             finally
             {
                 PublishingCredentialStore.Clear(GetCredentialScope(_options.target));
-                _ftp.Password = string.Empty;
+                _ftp.Password = _rememberFtpPassword
+                    ? PublishingCredentialStore.GetPassword(GetCredentialScope(_options.target))
+                    : string.Empty;
                 _uploadCancellation.Dispose();
                 _uploadCancellation = null;
                 _uploading = false;
@@ -392,21 +599,16 @@ namespace GameIntegration.Editor
         private void LoadFtpSettings(BuildTarget target)
         {
             string prefix = GetFtpPrefsPrefix(target);
-            try
-            {
-                SynchronizeFtpConnectionFromSettings(IntegrationProjectPreparer.LoadSettings());
-            }
-            catch
-            {
-                _ftp.Host = string.Empty;
-                _ftp.Port = 21;
-                _ftp.UserName = string.Empty;
-                _ftp.Password = string.Empty;
-            }
+            _ftp.Host = EditorPrefs.GetString(prefix + "Host", string.Empty);
+            _ftp.Port = EditorPrefs.GetInt(prefix + "Port", 21);
+            _ftp.UserName = PublishingCredentialStore.GetUserName(
+                EditorPrefs.GetString(prefix + "UserName", string.Empty));
+            _ftp.Password = PublishingCredentialStore.GetPassword(GetCredentialScope(target));
             _ftp.HotUpdateDirectory = EditorPrefs.GetString(prefix + "HotDirectory", string.Empty);
             _ftp.ClientDirectory = EditorPrefs.GetString(prefix + "ClientDirectory", string.Empty);
             _ftp.EnableSsl = EditorPrefs.GetBool(prefix + "EnableSsl", false);
             _ftp.UsePassive = EditorPrefs.GetBool(prefix + "UsePassive", true);
+            _rememberFtpPassword = EditorPrefs.GetBool(prefix + "RememberPassword", true);
             string previousBoundVersion = EditorPrefs.GetString(prefix + "BoundPlayerVersion",
                 _options.clientVersion);
             ReplaceTrailingVersion(ref _ftp.HotUpdateDirectory, previousBoundVersion,
@@ -419,45 +621,17 @@ namespace GameIntegration.Editor
         private void SaveFtpSettings(BuildTarget target)
         {
             string prefix = GetFtpPrefsPrefix(target);
+            EditorPrefs.SetString(prefix + "Host", _ftp.Host?.Trim() ?? string.Empty);
+            EditorPrefs.SetInt(prefix + "Port", Mathf.Max(1, _ftp.Port));
+            EditorPrefs.SetString(prefix + "UserName", _ftp.UserName ?? string.Empty);
             EditorPrefs.SetString(prefix + "HotDirectory", _ftp.HotUpdateDirectory ?? string.Empty);
             EditorPrefs.SetString(prefix + "ClientDirectory", _ftp.ClientDirectory ?? string.Empty);
             EditorPrefs.SetBool(prefix + "EnableSsl", _ftp.EnableSsl);
             EditorPrefs.SetBool(prefix + "UsePassive", _ftp.UsePassive);
+            EditorPrefs.SetBool(prefix + "RememberPassword", _rememberFtpPassword);
             EditorPrefs.SetString(prefix + "BoundPlayerVersion", _options.clientVersion ?? string.Empty);
-        }
-
-        private void SynchronizeFtpConnectionFromSettings(QHYFrameworkSettings settings)
-        {
-            if (!settings)
-                return;
-            _ftp.Host = settings.ftpHost ?? string.Empty;
-            _ftp.Port = settings.ftpPort > 0 ? settings.ftpPort : 21;
-            _ftp.UserName = PublishingCredentialStore.GetUserName(settings.ftpUserName);
-            _ftp.Password = PublishingCredentialStore.GetPassword(GetCredentialScope(_options.target));
-        }
-
-        private void SaveFtpConnectionToSettings(QHYFrameworkSettings settings)
-        {
-            if (!settings)
-                return;
-
-            string host = _ftp.Host?.Trim() ?? string.Empty;
-            int port = Mathf.Max(1, _ftp.Port);
-            string userName = _ftp.UserName ?? string.Empty;
-            if (string.Equals(settings.ftpHost, host, StringComparison.Ordinal) &&
-                settings.ftpPort == port &&
-                string.Equals(settings.ftpUserName, userName, StringComparison.Ordinal))
-            {
-                PublishingCredentialStore.SetPassword(GetCredentialScope(_options.target), _ftp.Password);
-                return;
-            }
-
-            settings.ftpHost = host;
-            settings.ftpPort = port;
-            settings.ftpUserName = userName;
-            PublishingCredentialStore.SetPassword(GetCredentialScope(_options.target), _ftp.Password);
-            EditorUtility.SetDirty(settings);
-            AssetDatabase.SaveAssetIfDirty(settings);
+            PublishingCredentialStore.SetPassword(GetCredentialScope(target), _ftp.Password,
+                _rememberFtpPassword);
         }
 
         private void DrawUploadPlanSummary()
@@ -529,7 +703,17 @@ namespace GameIntegration.Editor
             string prefix = GetReleasePrefsPrefix(target);
             _options.channel = EditorPrefs.GetString(prefix + "Channel", "default");
             _options.developmentBuild = EditorPrefs.GetBool(prefix + "DevelopmentBuild", false);
-            _automaticVersioning = EditorPrefs.GetBool(prefix + "AutomaticVersioning", false);
+            bool automaticVersioningInitialized = EditorPrefs.GetBool(
+                prefix + "AutomaticVersioningInitialized", false);
+            _automaticVersioning = automaticVersioningInitialized
+                ? EditorPrefs.GetBool(prefix + "AutomaticVersioning", true)
+                : true;
+            if (!automaticVersioningInitialized)
+            {
+                // Migrate projects from the previous opt-in behavior to the new default once.
+                EditorPrefs.SetBool(prefix + "AutomaticVersioning", true);
+                EditorPrefs.SetBool(prefix + "AutomaticVersioningInitialized", true);
+            }
             _options.outputRoot = EditorPrefs.GetString(GetProjectPrefsPrefix(ReleasePrefsPrefix) + "OutputRoot",
                 "Releases");
 
@@ -562,6 +746,7 @@ namespace GameIntegration.Editor
             EditorPrefs.SetBool(prefix + "PackageVersionInitialized", true);
             EditorPrefs.SetBool(prefix + "DevelopmentBuild", _options.developmentBuild);
             EditorPrefs.SetBool(prefix + "AutomaticVersioning", _automaticVersioning);
+            EditorPrefs.SetBool(prefix + "AutomaticVersioningInitialized", true);
             EditorPrefs.SetString(GetProjectPrefsPrefix(ReleasePrefsPrefix) + "OutputRoot",
                 _options.outputRoot ?? "Releases");
         }

@@ -8,12 +8,14 @@ namespace GameIntegration.Editor
         public static void Build()
         {
             string[] args = Environment.GetCommandLineArgs();
+            string resourceVersion = Read(args, "-resourceVersion", string.Empty);
             var options = new ReleaseOptions
             {
                 channel = Read(args, "-releaseChannel", "default"),
                 clientVersion = Read(args, "-clientVersion",
                     Read(args, "-releaseVersion", PlayerSettings.bundleVersion)),
-                resourceVersion = Read(args, "-resourceVersion", string.Empty),
+                resourceVersion = resourceVersion,
+                automaticResourceVersion = string.IsNullOrWhiteSpace(resourceVersion),
                 outputRoot = Read(args, "-releaseOutput", "Releases"),
                 developmentBuild = bool.TryParse(Read(args, "-development", "false"), out bool development) && development
             };

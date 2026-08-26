@@ -116,10 +116,16 @@ namespace GameIntegration.Editor
                     "[QHYFramework] Created host project settings: {0}", SettingsPath));
             }
             else if (File.ReadLines(SettingsPath).Any(line =>
-                         line.TrimStart().StartsWith("ftpPassword:", StringComparison.Ordinal)))
+                     {
+                         string value = line.TrimStart();
+                         return value.StartsWith("ftpHost:", StringComparison.Ordinal) ||
+                                value.StartsWith("ftpPort:", StringComparison.Ordinal) ||
+                                value.StartsWith("ftpUserName:", StringComparison.Ordinal) ||
+                                value.StartsWith("ftpPassword:", StringComparison.Ordinal);
+                     }))
             {
-                // 1.1.4 and earlier serialized the FTP password. Re-serializing with the
-                // 1.1.5 type removes the orphaned YAML field without ever reading or logging it.
+                // FTP publication configuration is Editor-local now. Re-serializing removes all
+                // orphaned FTP YAML fields without ever reading or logging the legacy password.
                 EditorUtility.SetDirty(settings);
                 AssetDatabase.SaveAssetIfDirty(settings);
             }
