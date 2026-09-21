@@ -13,10 +13,14 @@ namespace GameIntegration
     internal sealed class PackagePatchWorkflow
     {
         private readonly QHYFrameworkSettings _settings;
+        private readonly DistributionRuntimeConfig _distribution;
         private readonly EPlayMode _playMode;
         private readonly Action<StartupState, float, string> _report;
         private readonly Action<DownloadProgressChangedEventArgs> _downloadProgress;
         private readonly Action<DownloadErrorEventArgs> _downloadError;
+        private readonly Dictionary<string, string> _downloadFileNames =
+            new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        private string _lastDownloadFailure = string.Empty;
         private bool _packageInitialized;
 
         public ResourcePackage Package { get; private set; }
@@ -25,12 +29,14 @@ namespace GameIntegration
 
         public PackagePatchWorkflow(
             QHYFrameworkSettings settings,
+            DistributionRuntimeConfig distribution,
             EPlayMode playMode,
             Action<StartupState, float, string> report,
             Action<DownloadProgressChangedEventArgs> downloadProgress,
             Action<DownloadErrorEventArgs> downloadError)
         {
             _settings = settings;
+            _distribution = distribution ?? throw new ArgumentNullException(nameof(distribution));
             _playMode = playMode;
             _report = report;
             _downloadProgress = downloadProgress;
@@ -57,19 +63,30 @@ namespace GameIntegration
                 return;
 
             Report(StartupState.Downloading, "正在下载资源文件…");
+            _lastDownloadFailure = string.Empty;
+            _downloadFileNames.Clear();
             Downloader.DownloadProgressChanged += _downloadProgress;
-            Downloader.DownloadError += _downloadError;
+            Downloader.DownloadFileStarted += OnDownloadFileStarted;
+            Downloader.DownloadError += OnDownloadError;
             try
             {
                 Downloader.StartDownload();
                 await Downloader;
-                YooOperation.EnsureSucceeded(Downloader, StartupState.Downloading, "下载资源文件");
+                try
+                {
+                    YooOperation.EnsureSucceeded(Downloader, StartupState.Downloading, "下载资源文件");
+                }
+                catch (StartupException) when (!string.IsNullOrWhiteSpace(_lastDownloadFailure))
+                {
+                    throw new StartupException(StartupState.Downloading, _lastDownloadFailure);
+                }
                 _report(StartupState.Downloading, 1f, "资源文件下载完成");
             }
             finally
             {
                 Downloader.DownloadProgressChanged -= _downloadProgress;
-                Downloader.DownloadError -= _downloadError;
+                Downloader.DownloadFileStarted -= OnDownloadFileStarted;
+                Downloader.DownloadError -= OnDownloadError;
             }
 
             if (_settings.clearUnusedCacheAfterUpdate)
@@ -77,6 +94,25 @@ namespace GameIntegration
 
             // 只有资源完整下载后，才把新清单记为可离线回退版本。
             SaveLastGoodVersion(ActiveVersion);
+        }
+
+        private void OnDownloadFileStarted(DownloadFileStartedEventArgs args)
+        {
+            if (!string.IsNullOrWhiteSpace(args.BundleName) && !string.IsNullOrWhiteSpace(args.FileName))
+                _downloadFileNames[args.BundleName] = args.FileName;
+        }
+
+        private void OnDownloadError(DownloadErrorEventArgs args)
+        {
+            string actualFileName = _downloadFileNames.TryGetValue(args.FileName, out string value)
+                ? value
+                : args.FileName;
+            string url;
+            try { url = new DistributionPathResolver(_distribution).ResolveYooAssetUrl(actualFileName); }
+            catch { url = "（无法解析远端 URL）"; }
+            _lastDownloadFailure = $"下载资源文件失败。Bundle：{args.FileName}；远端文件：{actualFileName}；" +
+                                   $"URL：{url}；错误：{args.ErrorInfo}";
+            _downloadError?.Invoke(args);
         }
 
         private async Task InitializePackageAsync()
@@ -158,7 +194,7 @@ namespace GameIntegration
 
         private HostPlayModeOptions CreateHostPlayModeOptions()
         {
-            var remoteService = new FixedRemoteService(_settings.GetRemotePackageUrlForCurrentPlatform());
+            var remoteService = new DistributionRemoteService(new DistributionPathResolver(_distribution));
             FileSystemParameters builtinParameters =
                 FileSystemParameters.CreateDefaultBuiltinFileSystemParameters();
             builtinParameters.AddParameter(EFileSystemParameter.CopyBuiltinPackageManifest,
@@ -190,8 +226,6 @@ namespace GameIntegration
             await operation;
             if (operation.Status == EOperationStatus.Succeeded)
             {
-                if (_playMode == EPlayMode.HostPlayMode && _settings.refreshHostManifestEveryStartup)
-                    await ClearCachedManifestFilesAsync();
                 return operation.PackageVersion;
             }
 
@@ -210,15 +244,6 @@ namespace GameIntegration
 
             throw new StartupException(StartupState.CheckingVersion,
                 $"{_playMode} 请求资源版本失败：{operation.Error}");
-        }
-
-        private async Task ClearCachedManifestFilesAsync()
-        {
-            Report(StartupState.LoadingManifest, "正在刷新远端资源清单…");
-            ClearCacheOperation operation = Package.ClearCacheAsync(
-                new ClearCacheOptions(ClearCacheMethods.ClearAllManifestFiles));
-            await operation;
-            YooOperation.EnsureSucceeded(operation, StartupState.LoadingManifest, "清理旧资源清单缓存");
         }
 
         private async Task<string> LoadUsableManifestAsync(string requestedVersion)
@@ -268,19 +293,16 @@ namespace GameIntegration
 
         private string GetLastGoodVersion()
         {
-            string value = PlayerPrefs.GetString(_settings.GetLocalVersionKey(_playMode), string.Empty);
+            string value = PlayerPrefs.GetString(_settings.GetLocalVersionKey(_playMode, _distribution), string.Empty);
             if (!string.IsNullOrWhiteSpace(value))
                 return value;
 
-            // 兼容升级多平台配置前已经安装的 Windows 客户端缓存。
-            if (QHYFrameworkSettings.GetCurrentPlatform() == IntegrationPlatform.Windows)
-                return PlayerPrefs.GetString(_settings.GetLegacyLocalVersionKey(_playMode), string.Empty);
             return string.Empty;
         }
 
         private void SaveLastGoodVersion(string version)
         {
-            PlayerPrefs.SetString(_settings.GetLocalVersionKey(_playMode), version);
+            PlayerPrefs.SetString(_settings.GetLocalVersionKey(_playMode, _distribution), version);
             PlayerPrefs.Save();
         }
 
@@ -289,20 +311,18 @@ namespace GameIntegration
             _report(state, 0f, message);
         }
 
-        private sealed class FixedRemoteService : IRemoteService
+        private sealed class DistributionRemoteService : IRemoteService
         {
-            private readonly string _root;
+            private readonly DistributionPathResolver _resolver;
 
-            public FixedRemoteService(string root)
+            public DistributionRemoteService(DistributionPathResolver resolver)
             {
-                if (string.IsNullOrWhiteSpace(root))
-                    throw new ArgumentException("远端资源根地址不能为空。", nameof(root));
-                _root = root.Trim().TrimEnd('/');
+                _resolver = resolver ?? throw new ArgumentNullException(nameof(resolver));
             }
 
             public IReadOnlyList<string> GetRemoteUrls(string fileName)
             {
-                return new[] { $"{_root}/{fileName}" };
+                return new[] { _resolver.ResolveYooAssetUrl(fileName) };
             }
         }
     }

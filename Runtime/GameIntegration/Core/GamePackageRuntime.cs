@@ -18,6 +18,7 @@ namespace GameIntegration
         public static GamePackageRuntime Current { get; private set; }
         public QHYFrameworkSettings Settings => _settings;
         public EPlayMode PlayMode { get; }
+        public DistributionRuntimeConfig Distribution { get; }
         public ResourcePackage Package => _patchWorkflow.Package;
         public StartupState State { get; private set; } = StartupState.Idle;
         public string Error { get; private set; } = string.Empty;
@@ -34,11 +35,18 @@ namespace GameIntegration
         }
 
         public GamePackageRuntime(QHYFrameworkSettings settings, EPlayMode playMode)
+            : this(settings, playMode, DistributionRuntimeConfigLoader.Load(settings, playMode))
+        {
+        }
+
+        public GamePackageRuntime(QHYFrameworkSettings settings, EPlayMode playMode,
+            DistributionRuntimeConfig distribution)
         {
             _settings = settings ? settings : throw new ArgumentNullException(nameof(settings));
             PlayMode = playMode;
+            Distribution = distribution ?? throw new ArgumentNullException(nameof(distribution));
             _patchWorkflow = new PackagePatchWorkflow(
-                _settings, PlayMode, ReportStage, OnDownloadProgressChanged, OnDownloadError);
+                _settings, Distribution, PlayMode, ReportStage, OnDownloadProgressChanged, OnDownloadError);
             Current = this;
         }
 

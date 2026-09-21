@@ -22,6 +22,12 @@ namespace GameIntegration.Editor
         public const string GeneratedRoot = ProjectRoot + "/Generated";
         public const string GeneratedHotUpdate = GeneratedRoot + "/HotUpdate";
         public const string GeneratedAotMetadata = GeneratedRoot + "/AOTMetadata";
+        public const string GeneratedQhyLinkRoot = GeneratedRoot + "/QHYLink";
+        public const string GeneratedQhyLinkXml = GeneratedQhyLinkRoot + "/link.xml";
+        public const string GeneratedDistributionRoot = GeneratedRoot + "/Distribution";
+        public const string GeneratedDistributionResources = GeneratedDistributionRoot + "/Resources";
+        public const string GeneratedDistributionConfig = GeneratedDistributionResources +
+                                                           "/QHYDistributionConfig.json";
         public const string HotUpdateScripts = ProjectRoot + "/Scripts/HotUpdate";
 
         public const string BootScene = "Assets/Scenes/Boot.unity";

@@ -11,12 +11,10 @@ namespace GameIntegration.Editor
             string resourceVersion = Read(args, "-resourceVersion", string.Empty);
             var options = new ReleaseOptions
             {
-                channel = Read(args, "-releaseChannel", "default"),
-                clientVersion = Read(args, "-clientVersion",
-                    Read(args, "-releaseVersion", PlayerSettings.bundleVersion)),
+                clientVersion = Read(args, "-clientVersion", PlayerSettings.bundleVersion),
                 resourceVersion = resourceVersion,
                 automaticResourceVersion = string.IsNullOrWhiteSpace(resourceVersion),
-                outputRoot = Read(args, "-releaseOutput", "Releases"),
+                outputRoot = "Releases",
                 developmentBuild = bool.TryParse(Read(args, "-development", "false"), out bool development) && development
             };
             if (Enum.TryParse(Read(args, "-releaseMode", ReleaseMode.FullPackage.ToString()), true,

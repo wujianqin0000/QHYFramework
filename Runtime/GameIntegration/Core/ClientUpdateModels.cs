@@ -5,7 +5,7 @@ namespace GameIntegration
     [Serializable]
     public sealed class ClientUpdateManifest
     {
-        public int SchemaVersion = 1;
+        public int SchemaVersion = DistributionRuntimeConfig.CurrentSchemaVersion;
         public string Platform = string.Empty;
         public string Version = string.Empty;
         public int AndroidVersionCode;

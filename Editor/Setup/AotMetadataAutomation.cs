@@ -189,7 +189,9 @@ namespace GameIntegration.Editor
 
         internal static string GetRoot(BuildTarget target)
         {
-            return Path.GetFullPath(Path.Combine("Library", "GameIntegration", "AOTMetadata", target.ToString()));
+            string platform = target == BuildTarget.Android ? "android" : "windows";
+            return Path.GetFullPath(Path.Combine("ProjectSettings", "QHYFramework", "ReleaseState",
+                platform, "AOTMetadata"));
         }
 
         internal static string GetRoot(BuildTarget target, string clientVersion)
@@ -197,8 +199,7 @@ namespace GameIntegration.Editor
             if (string.IsNullOrWhiteSpace(clientVersion)) return GetRoot(target);
             string safe = new string(clientVersion.Select(character =>
                 Path.GetInvalidFileNameChars().Contains(character) ? '_' : character).ToArray());
-            return Path.GetFullPath(Path.Combine("Library", "GameIntegration", "AOTMetadata",
-                target.ToString(), safe));
+            return Path.Combine(GetRoot(target), safe);
         }
 
         internal static void Save(BuildTarget target, string sourceRoot, IEnumerable<string> names,
@@ -272,34 +273,27 @@ namespace GameIntegration.Editor
             {
                 AotMetadataSnapshotManifest manifest =
                     JsonUtility.FromJson<AotMetadataSnapshotManifest>(File.ReadAllText(manifestPath));
-                if (manifest == null || (manifest.schemaVersion != 1 && manifest.schemaVersion != 2) ||
+                if (manifest == null || manifest.schemaVersion != 2 ||
                     !string.Equals(manifest.buildTarget, target.ToString(), StringComparison.Ordinal))
                     throw new InvalidDataException($"Invalid AOT metadata snapshot manifest: {manifestPath}");
                 names = AotMetadataAutomation.Normalize(manifest.assemblies);
-                if (manifest.schemaVersion == 2)
+                var records = (manifest.files ?? Array.Empty<AotMetadataSnapshotFile>())
+                    .ToDictionary(item => item.name, StringComparer.OrdinalIgnoreCase);
+                foreach (string name in names)
                 {
-                    var records = (manifest.files ?? Array.Empty<AotMetadataSnapshotFile>())
-                        .ToDictionary(item => item.name, StringComparer.OrdinalIgnoreCase);
-                    foreach (string name in names)
-                    {
-                        string source = Path.Combine(root, name + ".bytes");
-                        if (!records.TryGetValue(name, out AotMetadataSnapshotFile record) ||
-                            !File.Exists(source) || new FileInfo(source).Length != record.length ||
-                            !string.Equals(ComputeSha256(source), record.sha256,
-                                StringComparison.OrdinalIgnoreCase))
-                            throw new InvalidDataException(
-                                $"AOT metadata snapshot SHA-256 validation failed: {name}");
-                    }
+                    string source = Path.Combine(root, name + ".bytes");
+                    if (!records.TryGetValue(name, out AotMetadataSnapshotFile record) ||
+                        !File.Exists(source) || new FileInfo(source).Length != record.length ||
+                        !string.Equals(ComputeSha256(source), record.sha256,
+                            StringComparison.OrdinalIgnoreCase))
+                        throw new InvalidDataException(
+                            $"AOT metadata snapshot SHA-256 validation failed: {name}");
                 }
             }
             else
             {
-                names = Directory.GetFiles(root, "*.dll.bytes", SearchOption.TopDirectoryOnly)
-                    .Select(path => Path.GetFileName(path).Substring(0,
-                        Path.GetFileName(path).Length - ".bytes".Length)).ToArray();
-                names = AotMetadataAutomation.Normalize(names);
-                Debug.LogWarning($"[QHYFramework] Legacy AOT snapshot for {target} has no manifest. " +
-                                 "The assembly list was recovered from existing files.");
+                throw new InvalidDataException($"AOT metadata snapshot manifest is missing: {manifestPath}. " +
+                                               "Run a new FullPackage to establish the schema v5 baseline.");
             }
 
             if (Directory.Exists(destinationRoot))
@@ -327,26 +321,21 @@ namespace GameIntegration.Editor
             }
 
             string manifestPath = Path.Combine(root, ManifestFileName);
-            string[] expectedNames;
-            if (File.Exists(manifestPath))
+            if (!File.Exists(manifestPath))
             {
-                AotMetadataSnapshotManifest manifest =
-                    JsonUtility.FromJson<AotMetadataSnapshotManifest>(File.ReadAllText(manifestPath));
-                if (manifest == null || (manifest.schemaVersion != 1 && manifest.schemaVersion != 2) ||
-                    !string.Equals(manifest.buildTarget, target.ToString(), StringComparison.Ordinal))
-                {
-                    reason = $"Invalid AOT metadata snapshot manifest: {manifestPath}";
-                    return false;
-                }
-                expectedNames = AotMetadataAutomation.Normalize(manifest.assemblies);
+                reason = $"AOT metadata snapshot manifest is missing: {manifestPath}. " +
+                         "Run a new FullPackage to establish the schema v5 baseline.";
+                return false;
             }
-            else
+            AotMetadataSnapshotManifest manifest =
+                JsonUtility.FromJson<AotMetadataSnapshotManifest>(File.ReadAllText(manifestPath));
+            if (manifest == null || manifest.schemaVersion != 2 ||
+                !string.Equals(manifest.buildTarget, target.ToString(), StringComparison.Ordinal))
             {
-                expectedNames = AotMetadataAutomation.Normalize(Directory.GetFiles(root,
-                        "*.dll.bytes", SearchOption.TopDirectoryOnly)
-                    .Select(path => Path.GetFileName(path).Substring(0,
-                        Path.GetFileName(path).Length - ".bytes".Length)));
+                reason = $"Invalid AOT metadata snapshot manifest: {manifestPath}";
+                return false;
             }
+            string[] expectedNames = AotMetadataAutomation.Normalize(manifest.assemblies);
 
             string[] actualNames = AotMetadataAutomation.Normalize(Directory.GetFiles(generatedRoot,
                     "*.dll.bytes", SearchOption.TopDirectoryOnly)

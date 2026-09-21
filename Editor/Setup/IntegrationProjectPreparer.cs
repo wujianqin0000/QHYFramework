@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Text;
 using HybridCLR.Editor;
 using HybridCLR.Editor.Commands;
 using UnityEditor;
@@ -14,6 +15,94 @@ using YooAsset.Editor;
 
 namespace GameIntegration.Editor
 {
+    /// <summary>Protects reproducible QHY output without replacing user VCS rules.</summary>
+    internal static class VersionControlIgnoreManager
+    {
+        internal const string BeginMarker = "# QHY Framework generated outputs - BEGIN";
+        internal const string EndMarker = "# QHY Framework generated outputs - END";
+        private static readonly string[] PlasticRules =
+            { "/Releases", "/releases", "/QHYBuilds", "/qhybuilds" };
+        private static readonly string[] GitRules =
+            { "/Releases/", "/releases/", "/QHYBuilds/", "/qhybuilds/" };
+
+        [InitializeOnLoadMethod]
+        private static void ScheduleProtection()
+        {
+            EditorApplication.delayCall += TryEnsureForCurrentProject;
+        }
+
+        private static void TryEnsureForCurrentProject()
+        {
+            try
+            {
+                bool changed = EnsureForCurrentProjectOrThrow();
+                if (changed && (Directory.Exists(ProjectPath("Releases")) ||
+                                Directory.Exists(ProjectPath("QHYBuilds"))))
+                    Debug.LogWarning(EditorLocalization.Text(
+                        "[QHYFramework] 已补充版本控制忽略规则。若 Releases 或 QHYBuilds 此前已被提交，忽略规则不会自动取消跟踪；请在 Plastic/Git 中将它们从版本控制移除，但保留本地文件。",
+                        "[QHYFramework] Version-control ignore rules were added. If Releases or QHYBuilds were already committed, ignore rules do not untrack them; remove them from Plastic/Git while keeping the local files."));
+            }
+            catch (Exception exception)
+            {
+                Debug.LogError(EditorLocalization.Format(
+                    "[QHYFramework] 无法配置版本控制保护：{0}。发布前必须让项目根目录的 ignore.conf/.gitignore 忽略 Releases 和 QHYBuilds。",
+                    "[QHYFramework] Could not configure version-control protection: {0}. Before publication, the project-root ignore.conf/.gitignore must ignore Releases and QHYBuilds.",
+                    exception.GetBaseException().Message));
+            }
+        }
+
+        internal static bool EnsureForCurrentProjectOrThrow()
+        {
+            bool changed = EnsureManagedBlock(ProjectPath("ignore.conf"), PlasticRules);
+            string gitPath = ProjectPath(".gitignore");
+            if (Directory.Exists(ProjectPath(".git")) || File.Exists(ProjectPath(".git")) ||
+                File.Exists(gitPath))
+                changed |= EnsureManagedBlock(gitPath, GitRules);
+            return changed;
+        }
+
+        internal static bool EnsureManagedBlock(string path, string[] rules)
+        {
+            if (string.IsNullOrWhiteSpace(path))
+                throw new ArgumentException("Ignore file path is empty.", nameof(path));
+            if (rules == null || rules.Length == 0)
+                throw new ArgumentException("Ignore rules are empty.", nameof(rules));
+
+            string existing = File.Exists(path) ? File.ReadAllText(path) : string.Empty;
+            int begin = existing.IndexOf(BeginMarker, StringComparison.Ordinal);
+            int end = existing.IndexOf(EndMarker, StringComparison.Ordinal);
+            if ((begin >= 0) != (end >= 0) || (begin >= 0 && end < begin))
+                throw new InvalidDataException("QHY managed ignore block is malformed: " + path);
+
+            string newline = existing.Contains("\r\n") ? "\r\n" : "\n";
+            string block = BeginMarker + newline + string.Join(newline, rules) + newline + EndMarker;
+            string updated;
+            if (begin >= 0)
+            {
+                int after = end + EndMarker.Length;
+                updated = existing.Substring(0, begin) + block + existing.Substring(after);
+            }
+            else
+            {
+                string prefix = existing.Length == 0
+                    ? string.Empty
+                    : existing.TrimEnd('\r', '\n') + newline + newline;
+                updated = prefix + block + newline;
+            }
+
+            if (string.Equals(existing, updated, StringComparison.Ordinal)) return false;
+            string directory = Path.GetDirectoryName(path);
+            if (!string.IsNullOrWhiteSpace(directory)) Directory.CreateDirectory(directory);
+            if (File.Exists(path) && new FileInfo(path).IsReadOnly)
+                throw new UnauthorizedAccessException("Ignore file is read-only: " + path);
+            File.WriteAllText(path, updated, new UTF8Encoding(false));
+            return true;
+        }
+
+        private static string ProjectPath(string relative) => Path.GetFullPath(Path.Combine(
+            Application.dataPath, "..", relative));
+    }
+
     public static class IntegrationProjectPreparer
     {
         internal const string ManagedCollectorMarker = "QHYFramework.Managed:v2";
@@ -88,6 +177,7 @@ namespace GameIntegration.Editor
 
         private static void PrepareProject()
         {
+            VersionControlIgnoreManager.EnsureForCurrentProjectOrThrow();
             EnsureFolders();
             AssetDatabase.Refresh();
             BootUIPrefabGenerator.EnsureExists();
@@ -114,20 +204,6 @@ namespace GameIntegration.Editor
                 AssetDatabase.SaveAssets();
                 Debug.Log(F("[QHYFramework] 已创建宿主项目配置：{0}",
                     "[QHYFramework] Created host project settings: {0}", SettingsPath));
-            }
-            else if (File.ReadLines(SettingsPath).Any(line =>
-                     {
-                         string value = line.TrimStart();
-                         return value.StartsWith("ftpHost:", StringComparison.Ordinal) ||
-                                value.StartsWith("ftpPort:", StringComparison.Ordinal) ||
-                                value.StartsWith("ftpUserName:", StringComparison.Ordinal) ||
-                                value.StartsWith("ftpPassword:", StringComparison.Ordinal);
-                     }))
-            {
-                // FTP publication configuration is Editor-local now. Re-serializing removes all
-                // orphaned FTP YAML fields without ever reading or logging the legacy password.
-                EditorUtility.SetDirty(settings);
-                AssetDatabase.SaveAssetIfDirty(settings);
             }
             return settings;
         }
@@ -250,10 +326,7 @@ namespace GameIntegration.Editor
             // 纯热更新只刷新热更 DLL，保留 FullPackage 生成的元数据，避免本地 AOT 改动污染旧客户端热更包。
             if (!refreshAotMetadata)
             {
-                string versionedSnapshot = AotMetadataSnapshotStore.GetRoot(target, clientVersion);
-                string snapshotRoot = Directory.Exists(versionedSnapshot)
-                    ? versionedSnapshot
-                    : AotMetadataSnapshotStore.GetRoot(target);
+                string snapshotRoot = AotMetadataSnapshotStore.GetRoot(target, clientVersion);
                 string[] snapshotAssemblies = AotMetadataSnapshotStore.Restore(target,
                     Path.GetFullPath(AotOutput), snapshotRoot);
                 AssetDatabase.Refresh();

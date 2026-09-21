@@ -2,8 +2,9 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
-using System.Runtime.InteropServices;
 using System.Security.Cryptography;
+using System.Runtime.InteropServices;
+using UnityEngine;
 using YooAsset;
 using YooAsset.Editor;
 
@@ -11,102 +12,196 @@ namespace GameIntegration.Editor
 {
     internal static class ReleaseSnapshotMaterializer
     {
-        private const string SharedBundleDirectoryName = "SharedBundles";
-
-        internal static void Materialize(string sourceRoot, string cdnRoot, string clientVersionRoot,
-            string packageName, string resourceVersion)
+        internal static ReleaseUploadPlan MaterializeV3(string sourceRoot, string buildRoot,
+            QHYFrameworkSettings settings, ReleaseOptions options, ResourceReleaseBaseline baseline)
         {
-            if (!Directory.Exists(sourceRoot))
-                throw new DirectoryNotFoundException("YooAsset package output is missing: " + sourceRoot);
+            if (!Directory.Exists(sourceRoot)) throw new DirectoryNotFoundException(sourceRoot);
+            string reportName = YooAssetConfiguration.GetBuildReportFileName(settings.packageName,
+                options.resourceVersion);
+            string reportSource = Path.Combine(sourceRoot, reportName);
+            if (!File.Exists(reportSource)) throw new FileNotFoundException("YooAsset build report is missing.", reportSource);
+            BuildReport report = BuildReport.Deserialize(File.ReadAllText(reportSource));
+            string reportsRoot = Path.Combine(buildRoot, "Reports");
+            Directory.CreateDirectory(reportsRoot);
+            File.Copy(reportSource, Path.Combine(reportsRoot, reportName), false);
 
-            string reportPath = Path.Combine(sourceRoot,
-                YooAssetConfiguration.GetBuildReportFileName(packageName, resourceVersion));
-            if (!File.Exists(reportPath))
-                throw new FileNotFoundException("YooAsset build report is missing.", reportPath);
-
-            BuildReport report = BuildReport.Deserialize(File.ReadAllText(reportPath));
-            MaterializeFiles(sourceRoot, cdnRoot, clientVersionRoot,
-                (report?.BundleInfos ?? new List<ReportBundleInfo>()).Select(item => item.FileName));
-        }
-
-        internal static void MaterializeFiles(string sourceRoot, string cdnRoot, string clientVersionRoot,
-            IEnumerable<string> bundleFileNames)
-        {
-            var bundleFiles = new HashSet<string>(bundleFileNames ?? Array.Empty<string>(),
+            var added = new List<UploadArtifact>();
+            var changed = new List<UploadArtifact>();
+            var unchanged = new List<UploadArtifact>();
+            Dictionary<string, ReportBundleInfo> previousByName = new Dictionary<string, ReportBundleInfo>(
                 StringComparer.OrdinalIgnoreCase);
-            string sharedRoot = Path.Combine(clientVersionRoot, SharedBundleDirectoryName);
-            Directory.CreateDirectory(cdnRoot);
-
-            foreach (string source in Directory.GetFiles(sourceRoot, "*", SearchOption.AllDirectories))
+            if (!string.IsNullOrWhiteSpace(baseline?.releaseRoot))
             {
-                string relative = source.Substring(sourceRoot.Length).TrimStart(
-                    Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-                string destination = Path.Combine(cdnRoot, relative);
-                Directory.CreateDirectory(Path.GetDirectoryName(destination) ?? cdnRoot);
-                if (!bundleFiles.Contains(Path.GetFileName(source)))
+                string previousReport = Path.Combine(baseline.releaseRoot, "Reports",
+                    YooAssetConfiguration.GetBuildReportFileName(settings.packageName, baseline.resourceVersion));
+                if (File.Exists(previousReport))
+                    previousByName = BuildReport.Deserialize(File.ReadAllText(previousReport)).BundleInfos
+                        .ToDictionary(x => x.BundleName, StringComparer.OrdinalIgnoreCase);
+            }
+            foreach (ReportBundleInfo bundle in report.BundleInfos.OrderBy(x => x.FileName,
+                         StringComparer.OrdinalIgnoreCase))
+            {
+                string source = Path.Combine(sourceRoot, bundle.FileName);
+                string destination = DistributionReleaseLayout.BundlePath(options, bundle.FileName);
+                UploadArtifact artifact = MergeImmutable(source, destination, options, true, 10,
+                    "immutable-year");
+                if (artifact.changeType == "Unchanged") unchanged.Add(artifact);
+                else if (previousByName.ContainsKey(bundle.BundleName))
                 {
-                    File.Copy(source, destination, true);
-                    continue;
+                    artifact.changeType = "Changed";
+                    changed.Add(artifact);
                 }
-
-                string shared = Path.Combine(sharedRoot, Path.GetFileName(source));
-                EnsureSharedBundle(source, shared);
-                if (!TryCreateHardLink(destination, shared))
-                    File.Copy(shared, destination, true);
+                else added.Add(artifact);
             }
+
+            foreach (string extension in new[] { ".bytes", ".hash" })
+            {
+                string name = settings.packageName + "_" + options.resourceVersion + extension;
+                string source = Path.Combine(sourceRoot, name);
+                if (!File.Exists(source)) throw new FileNotFoundException("YooAsset manifest artifact is missing.", source);
+                UploadArtifact artifact = MergeImmutable(source,
+                    DistributionReleaseLayout.VersionPath(options, extension), options,
+                    false, 20, "immutable-year");
+                (artifact.changeType == "Unchanged" ? unchanged : added).Add(artifact);
+            }
+
+            string versionName = settings.packageName + ".version";
+            string versionSource = Path.Combine(sourceRoot, versionName);
+            string versionDestination = DistributionReleaseLayout.CurrentVersionPath(options);
+            Directory.CreateDirectory(Path.GetDirectoryName(versionDestination) ??
+                                      DistributionReleaseLayout.PlatformRoot(options));
+            File.Copy(versionSource, versionDestination, true);
+            UploadArtifact pointer = CreateArtifact(versionDestination, options, false, "Changed", 100,
+                "no-cache", true);
+            added.Add(pointer);
+
+            WriteReleaseIndex(options);
+            string index = DistributionReleaseLayout.IndexPath(options);
+            added.Add(CreateArtifact(index, options, false, "Changed", 80, "metadata", false));
+
+            return new ReleaseUploadPlan
+            {
+                gameDirectory = DistributionReleaseLayout.GameDirectory(options),
+                platform = DistributionReleaseLayout.Platform(options),
+                clientVersion = options.clientVersion,
+                resourceVersion = options.resourceVersion,
+                previousResourceVersion = baseline?.resourceVersion ?? string.Empty,
+                releasesRoot = DistributionReleaseLayout.ReleasesRoot(options),
+                buildRoot = buildRoot,
+                stateRoot = DistributionReleaseLayout.StateRoot(options),
+                cdnRoot = settings.CreateRuntimeConfig(
+                    ReleasePipeline.GetIntegrationPlatform(options.target), options.clientVersion).cdnRoot,
+                originRoot = settings.CreateRuntimeConfig(
+                    ReleasePipeline.GetIntegrationPlatform(options.target), options.clientVersion).originRoot,
+                added = added.ToArray(),
+                changed = changed.ToArray(),
+                unchanged = unchanged.ToArray(),
+                snapshotBytes = report.BundleInfos.Sum(x => x.FileSize),
+                uploadBytes = added.Concat(changed).Sum(x => x.length),
+                estimatedClientDownloadBytes = report.BundleInfos.Where(x =>
+                    !previousByName.TryGetValue(x.BundleName, out ReportBundleInfo old) ||
+                    !string.Equals(old.FileName, x.FileName, StringComparison.OrdinalIgnoreCase))
+                    .Sum(x => x.FileSize)
+            };
         }
 
-        private static void EnsureSharedBundle(string source, string shared)
+        private static UploadArtifact MergeImmutable(string source, string destination,
+            ReleaseOptions options, bool bundle, int order, string cacheClass)
         {
-            Directory.CreateDirectory(Path.GetDirectoryName(shared) ?? throw new InvalidOperationException(
-                "Shared bundle directory is invalid."));
-            if (File.Exists(shared))
+            if (File.Exists(destination))
             {
-                if (new FileInfo(source).Length != new FileInfo(shared).Length ||
+                if (new FileInfo(source).Length != new FileInfo(destination).Length ||
                     !string.Equals(BundleDeltaAnalyzer.ComputeSha256(source),
-                        BundleDeltaAnalyzer.ComputeSha256(shared), StringComparison.OrdinalIgnoreCase))
-                    throw new InvalidDataException(
-                        $"Shared content-addressed bundle collision: '{Path.GetFileName(shared)}'.");
-                return;
+                        BundleDeltaAnalyzer.ComputeSha256(destination), StringComparison.OrdinalIgnoreCase))
+                    throw new InvalidDataException("禁止覆盖同名不可变发布对象：" + destination);
+                return CreateArtifact(destination, options, bundle, "Unchanged", order, cacheClass, false);
             }
-
-            string temporary = shared + ".copying";
-            try
-            {
-                if (File.Exists(temporary)) File.Delete(temporary);
-                File.Copy(source, temporary, false);
-                File.Move(temporary, shared);
-            }
-            finally
-            {
-                if (File.Exists(temporary)) File.Delete(temporary);
-            }
+            Directory.CreateDirectory(Path.GetDirectoryName(destination) ?? throw new InvalidOperationException());
+            File.Copy(source, destination, false);
+            return CreateArtifact(destination, options, bundle, "Added", order, cacheClass, false);
         }
 
-        private static bool TryCreateHardLink(string destination, string existing)
+        internal static UploadArtifact CreateArtifact(string path, ReleaseOptions options, bool bundle,
+            string changeType, int order, string cacheClass, bool pointer)
         {
-            if (File.Exists(destination)) File.Delete(destination);
-            PlatformID platform = Environment.OSVersion.Platform;
-            if (platform != PlatformID.Win32NT && platform != PlatformID.Win32Windows)
-                return false;
-            try
+            return new UploadArtifact
             {
-                return CreateHardLink(destination, existing, IntPtr.Zero);
-            }
-            catch (DllNotFoundException)
-            {
-                return false;
-            }
-            catch (EntryPointNotFoundException)
-            {
-                return false;
-            }
+                relativePath = DistributionReleaseLayout.ReleasesRelative(options, path),
+                resourcePath = DistributionReleaseLayout.ResourceRelative(options, path),
+                bundleName = bundle ? Path.GetFileName(path) : string.Empty,
+                sha256 = BundleDeltaAnalyzer.ComputeSha256(path),
+                length = new FileInfo(path).Length,
+                changeType = changeType,
+                contentAddressedBundle = bundle,
+                phase = pointer ? "Publish" : "Files",
+                pointer = pointer
+            };
         }
 
-        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-        [return: MarshalAs(UnmanagedType.Bool)]
+        private static void WriteReleaseIndex(ReleaseOptions options)
+        {
+            string bundlesRoot = Path.Combine(DistributionReleaseLayout.PlatformRoot(options),
+                "cdn", "bundles");
+            QhyBundleIndexEntry[] entries = Directory.Exists(bundlesRoot)
+                ? Directory.GetFiles(bundlesRoot, "*.bundle", SearchOption.TopDirectoryOnly).Select(path =>
+                    new QhyBundleIndexEntry
+                    {
+                        name = Path.GetFileName(path),
+                        sha256 = BundleDeltaAnalyzer.ComputeSha256(path),
+                        length = new FileInfo(path).Length
+                    }).OrderBy(x => x.name, StringComparer.OrdinalIgnoreCase).ToArray()
+                : Array.Empty<QhyBundleIndexEntry>();
+            string path = DistributionReleaseLayout.IndexPath(options);
+            Directory.CreateDirectory(Path.GetDirectoryName(path) ?? DistributionReleaseLayout.ReleasesRoot(options));
+            File.WriteAllText(path, UnityEngine.JsonUtility.ToJson(new QhyReleaseIndex { bundles = entries }, true));
+        }
+
+    }
+
+    internal static class IncrementalUploadMaterializer
+    {
+        [DllImport("Kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
         private static extern bool CreateHardLink(string newFileName, string existingFileName,
             IntPtr securityAttributes);
+
+        internal static void Synchronize(ReleaseOptions options, ReleaseUploadPlan plan)
+        {
+            string filesRoot = DistributionReleaseLayout.UploadFilesRoot(options);
+            string publishRoot = DistributionReleaseLayout.UploadPublishRoot(options);
+            Recreate(filesRoot);
+            Recreate(publishRoot);
+            UploadArtifact[] artifacts = (plan.added ?? Array.Empty<UploadArtifact>())
+                .Concat(plan.changed ?? Array.Empty<UploadArtifact>())
+                .Where(item => item != null && !string.IsNullOrWhiteSpace(item.relativePath))
+                .GroupBy(item => item.relativePath, StringComparer.OrdinalIgnoreCase)
+                .Select(group => group.First()).ToArray();
+            foreach (UploadArtifact artifact in artifacts)
+            {
+                string source = Path.Combine(plan.releasesRoot,
+                    artifact.relativePath.Replace('/', Path.DirectorySeparatorChar));
+                if (!File.Exists(source)) throw new FileNotFoundException("Release artifact is missing.", source);
+                string root = artifact.pointer ? publishRoot : filesRoot;
+                string destination = Path.Combine(root,
+                    artifact.relativePath.Replace('/', Path.DirectorySeparatorChar));
+                Directory.CreateDirectory(Path.GetDirectoryName(destination) ?? root);
+                if (artifact.pointer || artifact.resourcePath.EndsWith("origin/qhy.json",
+                        StringComparison.OrdinalIgnoreCase) || !TryHardLink(destination, source))
+                    File.Copy(source, destination, false);
+            }
+        }
+
+        private static bool TryHardLink(string destination, string source)
+        {
+            if (Application.platform != RuntimePlatform.WindowsEditor) return false;
+            try { return CreateHardLink(destination, source, IntPtr.Zero); }
+            catch { return false; }
+        }
+
+        private static void Recreate(string path)
+        {
+            if (Directory.Exists(path)) Directory.Delete(path, true);
+            Directory.CreateDirectory(path);
+        }
     }
 
     internal sealed class BundleDeltaAnalysis
@@ -122,142 +217,46 @@ namespace GameIntegration.Editor
 
     internal static class BundleDeltaAnalyzer
     {
-        internal static BundleDeltaAnalysis Analyze(string cdnRoot, string packageName,
-            ReleaseOptions options, ResourceReleaseBaseline baseline)
+        internal static BundleDeltaAnalysis AnalyzeV3(string sourceRoot, string packageName,
+            ReleaseOptions options, ResourceReleaseBaseline baseline, ReleaseUploadPlan plan)
         {
-            string currentReportPath = Path.Combine(cdnRoot,
-                YooAssetConfiguration.GetBuildReportFileName(packageName, options.resourceVersion));
-            BuildReport current = LoadReport(currentReportPath, true);
-            string previousCdn = baseline == null ? string.Empty : Path.Combine(baseline.releaseRoot, "CDN");
-            BuildReport previous = baseline == null ? null : LoadReport(Path.Combine(previousCdn,
-                YooAssetConfiguration.GetBuildReportFileName(packageName, baseline.resourceVersion)), false);
-
-            var previousByName = (previous?.BundleInfos ?? new List<ReportBundleInfo>())
-                .ToDictionary(item => item.BundleName, StringComparer.OrdinalIgnoreCase);
-            var currentByName = current.BundleInfos.ToDictionary(item => item.BundleName,
+            BuildReport current = LoadReport(Path.Combine(sourceRoot,
+                YooAssetConfiguration.GetBuildReportFileName(packageName, options.resourceVersion)), true);
+            BuildReport previous = null;
+            if (!string.IsNullOrWhiteSpace(baseline?.releaseRoot))
+            {
+                string oldReport = Path.Combine(baseline.releaseRoot, "Reports",
+                    YooAssetConfiguration.GetBuildReportFileName(packageName, baseline.resourceVersion));
+                previous = LoadReport(oldReport, false);
+            }
+            var oldByName = (previous?.BundleInfos ?? new List<ReportBundleInfo>())
+                .ToDictionary(x => x.BundleName, StringComparer.OrdinalIgnoreCase);
+            var currentByName = current.BundleInfos.ToDictionary(x => x.BundleName,
                 StringComparer.OrdinalIgnoreCase);
             var added = new List<BundleDeltaRecord>();
             var changed = new List<BundleDeltaRecord>();
             var unchanged = new List<BundleDeltaRecord>();
-
-            foreach (ReportBundleInfo bundle in current.BundleInfos.OrderBy(item => item.BundleName,
-                         StringComparer.OrdinalIgnoreCase))
+            foreach (ReportBundleInfo item in current.BundleInfos)
             {
-                if (!previousByName.TryGetValue(bundle.BundleName, out ReportBundleInfo old))
-                {
-                    added.Add(CreateRecord("Added", null, bundle, current, false));
-                    continue;
-                }
-
-                if (string.Equals(old.FileName, bundle.FileName, StringComparison.OrdinalIgnoreCase))
-                {
-                    ValidateContentAddressCollision(previousCdn, cdnRoot, old, bundle);
-                    unchanged.Add(CreateRecord("Unchanged", old, bundle, current, false));
-                }
+                if (!oldByName.TryGetValue(item.BundleName, out ReportBundleInfo old))
+                    added.Add(CreateRecord("Added", null, item, current, false));
+                else if (string.Equals(old.FileName, item.FileName, StringComparison.OrdinalIgnoreCase))
+                    unchanged.Add(CreateRecord("Unchanged", old, item, current, false));
                 else
-                {
-                    bool suspectedTypeTree = HaveSameAssets(old, bundle) &&
-                                             HaveSameDependencies(old, bundle);
-                    changed.Add(CreateRecord("Changed", old, bundle, current, suspectedTypeTree));
-                }
+                    changed.Add(CreateRecord("Changed", old, item, current,
+                        HaveSameAssets(old, item) && HaveSameDependencies(old, item)));
             }
-
-            BundleDeltaRecord[] removed = previousByName.Values
-                .Where(item => !currentByName.ContainsKey(item.BundleName))
-                .OrderBy(item => item.BundleName, StringComparer.OrdinalIgnoreCase)
-                .Select(item => CreateRecord("Removed", item, null, previous, false)).ToArray();
-
-            var result = new BundleDeltaAnalysis
+            BundleDeltaRecord[] removed = oldByName.Values.Where(x => !currentByName.ContainsKey(x.BundleName))
+                .Select(x => CreateRecord("Removed", x, null, previous, false)).ToArray();
+            return new BundleDeltaAnalysis
             {
                 CurrentReport = current,
                 PreviousReport = previous,
                 Added = added.ToArray(),
                 Changed = changed.ToArray(),
                 Unchanged = unchanged.ToArray(),
-                Removed = removed
-            };
-            result.UploadPlan = CreatePlan(cdnRoot, previousCdn, options, baseline, current,
-                result.Added, result.Changed, result.Unchanged, result.Removed);
-            return result;
-        }
-
-        private static ReleaseUploadPlan CreatePlan(string currentRoot, string previousRoot,
-            ReleaseOptions options, ResourceReleaseBaseline baseline, BuildReport report,
-            BundleDeltaRecord[] addedBundles, BundleDeltaRecord[] changedBundles,
-            BundleDeltaRecord[] unchangedBundles, BundleDeltaRecord[] removedBundles)
-        {
-            var added = new List<UploadArtifact>();
-            var changed = new List<UploadArtifact>();
-            var unchanged = new List<UploadArtifact>();
-            var bundleNames = new HashSet<string>(report.BundleInfos.Select(item => item.FileName),
-                StringComparer.OrdinalIgnoreCase);
-            var changedNames = new HashSet<string>(changedBundles.Select(item => item.currentFileName),
-                StringComparer.OrdinalIgnoreCase);
-            var unchangedNames = new HashSet<string>(unchangedBundles.Select(item => item.currentFileName),
-                StringComparer.OrdinalIgnoreCase);
-
-            foreach (string path in Directory.GetFiles(currentRoot, "*", SearchOption.TopDirectoryOnly))
-            {
-                string name = Path.GetFileName(path);
-                bool bundle = bundleNames.Contains(name);
-                UploadArtifact artifact = CreateArtifact(path, name, bundle,
-                    bundle && changedNames.Contains(name) ? "Changed" : "Added");
-                if (bundle && unchangedNames.Contains(name))
-                {
-                    artifact.changeType = "Unchanged";
-                    unchanged.Add(artifact);
-                }
-                else if ((bundle && changedNames.Contains(name)) ||
-                         (!bundle && !string.IsNullOrWhiteSpace(previousRoot) &&
-                          File.Exists(Path.Combine(previousRoot, name))))
-                {
-                    artifact.changeType = "Changed";
-                    changed.Add(artifact);
-                }
-                else
-                {
-                    added.Add(artifact);
-                }
-            }
-
-            long snapshotBytes = report.BundleInfos.Sum(item => item.FileSize);
-            long uploadBytes = added.Concat(changed).Sum(item => item.length);
-            long clientBytes = addedBundles.Sum(item => item.currentSize) +
-                               changedBundles.Sum(item => item.currentSize);
-            return new ReleaseUploadPlan
-            {
-                channel = options.channel,
-                platform = ReleasePipeline.GetPlatformName(options.target),
-                clientVersion = options.clientVersion,
-                resourceVersion = options.resourceVersion,
-                previousResourceVersion = baseline?.resourceVersion ?? string.Empty,
-                added = added.ToArray(),
-                changed = changed.ToArray(),
-                unchanged = unchanged.ToArray(),
-                removed = removedBundles.Select(item => new UploadArtifact
-                {
-                    relativePath = item.previousFileName,
-                    bundleName = item.bundleName,
-                    length = item.previousSize,
-                    changeType = "Removed",
-                    contentAddressedBundle = true
-                }).ToArray(),
-                snapshotBytes = snapshotBytes,
-                uploadBytes = uploadBytes,
-                estimatedClientDownloadBytes = clientBytes
-            };
-        }
-
-        private static UploadArtifact CreateArtifact(string path, string relative, bool bundle, string type)
-        {
-            return new UploadArtifact
-            {
-                relativePath = relative.Replace('\\', '/'),
-                bundleName = bundle ? relative : string.Empty,
-                sha256 = ComputeSha256(path),
-                length = new FileInfo(path).Length,
-                changeType = type,
-                contentAddressedBundle = bundle
+                Removed = removed,
+                UploadPlan = plan
             };
         }
 
@@ -299,22 +298,6 @@ namespace GameIntegration.Editor
         {
             return left.DependBundles.OrderBy(value => value).SequenceEqual(
                 right.DependBundles.OrderBy(value => value), StringComparer.OrdinalIgnoreCase);
-        }
-
-        private static void ValidateContentAddressCollision(string previousRoot, string currentRoot,
-            ReportBundleInfo previous, ReportBundleInfo current)
-        {
-            string oldPath = Path.Combine(previousRoot, previous.FileName);
-            string currentPath = Path.Combine(currentRoot, current.FileName);
-            if (!File.Exists(oldPath) || !File.Exists(currentPath))
-                throw new FileNotFoundException(
-                    $"Cannot validate content-addressed bundle '{current.FileName}' against the published baseline.",
-                    !File.Exists(oldPath) ? oldPath : currentPath);
-            if (new FileInfo(oldPath).Length != new FileInfo(currentPath).Length ||
-                !string.Equals(ComputeSha256(oldPath), ComputeSha256(currentPath),
-                    StringComparison.OrdinalIgnoreCase))
-                throw new InvalidDataException(
-                    $"Content-addressed bundle collision: '{current.FileName}' has different content.");
         }
 
         private static BuildReport LoadReport(string path, bool required)

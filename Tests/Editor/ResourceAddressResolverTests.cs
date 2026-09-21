@@ -175,17 +175,26 @@ namespace GameIntegration.Tests.Editor
         }
 
         [Test]
-        public void Snapshot_LegacyDirectoryRecoversNamesFromBytesFiles()
+        public void Snapshot_DefaultRootIsTrackedPlatformReleaseState()
+        {
+            string root = AotMetadataSnapshotStore.GetRoot(BuildTarget.StandaloneWindows64,
+                "v1.2.3").Replace('\\', '/');
+            StringAssert.Contains("ProjectSettings/QHYFramework/ReleaseState/windows/AOTMetadata/v1.2.3",
+                root);
+            StringAssert.DoesNotContain("/Library/", root);
+        }
+
+        [Test]
+        public void Snapshot_MissingManifestRequiresNewFullPackageBaseline()
         {
             string snapshot = Path.Combine(_root, "LegacySnapshot");
             string restored = Path.Combine(_root, "LegacyRestored");
             Directory.CreateDirectory(snapshot);
             File.WriteAllBytes(Path.Combine(snapshot, "QFramework.CoreKit.dll.bytes"), new byte[] { 7 });
 
-            string[] names = AotMetadataSnapshotStore.Restore(BuildTarget.Android, restored, snapshot);
-
-            CollectionAssert.AreEqual(new[] { "QFramework.CoreKit.dll" }, names);
-            Assert.IsTrue(File.Exists(Path.Combine(restored, "QFramework.CoreKit.dll.bytes")));
+            InvalidDataException exception = Assert.Throws<InvalidDataException>(() =>
+                AotMetadataSnapshotStore.Restore(BuildTarget.Android, restored, snapshot));
+            StringAssert.Contains("FullPackage", exception.Message);
         }
 
         [Test]

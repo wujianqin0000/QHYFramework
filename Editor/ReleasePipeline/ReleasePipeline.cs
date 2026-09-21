@@ -99,32 +99,41 @@ namespace GameIntegration.Editor
             if (options == null) throw new ArgumentNullException(nameof(options));
             if (options.target == BuildTarget.NoTarget)
                 throw new ArgumentException(L("必须指定目标平台。", "A Build Target must be specified."));
+            VersionControlIgnoreManager.EnsureForCurrentProjectOrThrow();
             string platform = GetPlatformName(options.target);
-            string legacyBaselinePath = Path.Combine(options.outputRoot, "Baselines", platform + ".sha256");
-            string clientVersionBaselinePath = Path.Combine(options.outputRoot, "Baselines",
-                platform + ".client-version");
-            string publishedClientVersion = File.Exists(clientVersionBaselinePath)
-                ? File.ReadAllText(clientVersionBaselinePath).Trim()
-                : string.Empty;
-            if (options.mode == ReleaseMode.HotUpdateOnly)
-                options.clientVersion = publishedClientVersion;
-            else if (string.IsNullOrWhiteSpace(options.clientVersion))
+            QHYFrameworkSettings settings = IntegrationProjectPreparer.LoadSettings();
+            options.gameDirectory = settings.GetGameDirectoryOrThrow();
+            if (string.IsNullOrWhiteSpace(options.clientVersion))
                 options.clientVersion = PlayerSettings.bundleVersion;
             ResourceReleaseBaseline resourceBaseline = ReleaseBaselineStore.Load(options);
+            if (resourceBaseline != null && !string.Equals(resourceBaseline.gameDirectory,
+                    options.gameDirectory, StringComparison.Ordinal))
+                throw new InvalidOperationException(
+                    $"发布基线的游戏资源目录为 '{resourceBaseline.gameDirectory}'，当前配置为 " +
+                    $"'{options.gameDirectory}'。schema v5 不迁移目录；请清空 ReleaseState、Releases、" +
+                    "QHYBuilds 和该游戏的服务器资源后重新 FullPackage。");
+            if (!string.IsNullOrWhiteSpace(resourceBaseline?.pendingBuildRoot))
+                throw new InvalidOperationException($"存在尚未完成上传登记的发布（{resourceBaseline.pendingResourceVersion}，{resourceBaseline.stage}）。请先完成或重试该版本，不要创建新候选版本。");
+            string publishedClientVersion = resourceBaseline?.hasPublishedBaseline == true
+                ? resourceBaseline.clientVersion : string.Empty;
+            if (options.mode == ReleaseMode.HotUpdateOnly)
+            {
+                if (string.IsNullOrWhiteSpace(publishedClientVersion))
+                    throw new InvalidOperationException("尚未建立 schema v5 Published FullPackage 基线，HotUpdateOnly 已禁用。");
+                options.clientVersion = publishedClientVersion;
+            }
             ResourceVersionResolver.Resolve(options, publishedClientVersion,
                 resourceBaseline?.resourceVersion, resourceBaseline?.highestResourceVersion);
-            string baselinePath = Path.Combine(options.outputRoot, "Baselines",
-                platform + "." + options.clientVersion + ".sha256");
-            if (options.mode == ReleaseMode.HotUpdateOnly && !File.Exists(baselinePath) &&
-                File.Exists(legacyBaselinePath))
-                baselinePath = legacyBaselinePath;
+            string stateRoot = DistributionReleaseLayout.StateRoot(options);
+            string baselinePath = Path.Combine(stateRoot, "aot-baseline.sha256");
             if (options.mode == ReleaseMode.FullPackage)
                 SynchronizePlayerVersion(options);
             ValidateOptions(options);
+            settings.CreateRuntimeConfig(GetIntegrationPlatform(options.target), options.clientVersion);
+            DistributionReleaseLayout.ValidateCleanOrV5(options);
             IntegrationProjectPreparer.SaveDirtyScenesOrThrow();
             EnsureActiveBuildTarget(options.target);
             BootUIPrefabGenerator.EnsureExists();
-            QHYFrameworkSettings settings = IntegrationProjectPreparer.LoadSettings();
             IntegrationProjectPreparer.ConfigureBuildSettings();
             IntegrationProjectPreparer.ConfigureCollectors(settings);
             ReleaseValidation.ThrowIfInvalid(settings, false, options.target);
@@ -157,17 +166,19 @@ namespace GameIntegration.Editor
             // CompileDll 和 AssetDatabase.Refresh 后必须重新加载 ScriptableObject。
             settings = IntegrationProjectPreparer.LoadSettings();
             IntegrationProjectPreparer.ConfigureCollectors(settings);
-            ReleaseValidation.ThrowIfInvalid(settings, true, options.target, effectiveAotMetadata);
+            EngineStrippingAnalysis engineStrippingAnalysis = options.mode == ReleaseMode.FullPackage
+                ? EngineStrippingLinkerAutomation.Synchronize(settings)
+                : null;
+            ReleaseValidation.ThrowIfInvalid(settings, true, options.target, effectiveAotMetadata,
+                engineStrippingAnalysis);
 
             string baseline = string.Empty;
-            string androidSigningBaselinePath = Path.Combine(options.outputRoot, "Baselines",
-                "Android.signing.sha256");
+            string androidSigningBaselinePath = Path.Combine(stateRoot, "android-signing.sha256");
             string androidSigningBaseline = options.mode == ReleaseMode.FullPackage
                 ? ValidateAndroidSigning(options, androidSigningBaselinePath)
                 : string.Empty;
             if (options.mode == ReleaseMode.HotUpdateOnly)
             {
-                ValidateHotUpdateClientVersion(clientVersionBaselinePath, options.clientVersion, platform);
                 // HotUpdateOnly 面向的是已经发布的客户端。即使当前工程的 AOT 输出发生变化，
                 // 也不能用它否定旧客户端，更不能把新 AOT 元数据混入旧客户端的热更包。
                 // 本地 AOT 差异只用于提示；冻结快照 SHA 和最终 AOT Bundle 差异会在后续阶段阻断发布。
@@ -176,14 +187,12 @@ namespace GameIntegration.Editor
             }
 
             YooAsset.Editor.BuildResult yooResult = BuildYooAssetPackage(settings, options);
-            string releaseRoot = GetReleaseRoot(options);
-            string cdnRoot = Path.Combine(releaseRoot, "CDN");
-            RecreateDirectory(cdnRoot);
-            // IRemoteService 接收的是纯文件名，CDN 根目录必须直接包含 version、manifest 和 bundle。
-            ReleaseSnapshotMaterializer.Materialize(yooResult.OutputPackageDirectory, cdnRoot,
-                GetClientVersionRoot(options), settings.packageName, options.resourceVersion);
-            BundleDeltaAnalysis delta = BundleDeltaAnalyzer.Analyze(cdnRoot, settings.packageName, options,
-                resourceBaseline);
+            string releaseRoot = DistributionReleaseLayout.BuildRoot(options);
+            if (Directory.Exists(releaseRoot))
+                throw new InvalidOperationException("同一 ClientVersion/ResourceVersion 的 Builds 产物已存在，禁止覆盖：" + releaseRoot);
+            Directory.CreateDirectory(releaseRoot);
+            BundleDeltaAnalysis delta = BundleDeltaAnalyzer.AnalyzeV3(yooResult.OutputPackageDirectory,
+                settings.packageName, options, resourceBaseline, null);
             if (!settings.ignoreTypeTreeChangesForIncrementalBuild)
             {
                 foreach (BundleDeltaRecord record in delta.Changed)
@@ -198,11 +207,13 @@ namespace GameIntegration.Editor
             if (options.mode == ReleaseMode.HotUpdateOnly &&
                 !ReleaseContentChangeDetector.HasChanges(delta))
             {
-                DiscardNoChangeOutput(yooResult.OutputPackageDirectory, releaseRoot, options.outputRoot);
+                DiscardNoChangeOutput(yooResult.OutputPackageDirectory, releaseRoot, "QHYBuilds");
                 throw new NoReleaseContentChangesException(L(
                     "未检测到任何热更 DLL 或 YooAsset 资源变化，本次为空更新，已取消构建且不会生成可上传版本。",
                     "No hot-update DLL or YooAsset content changes were detected. This empty update was canceled and no uploadable release was produced."));
             }
+            delta.UploadPlan = ReleaseSnapshotMaterializer.MaterializeV3(
+                yooResult.OutputPackageDirectory, releaseRoot, settings, options, resourceBaseline);
             BundleSizeAnalyzer.Analyze(delta.CurrentReport, settings);
             bool aotMetadataBundleChanged = delta.Changed.Concat(delta.Added).Concat(delta.Removed).Any(record =>
                 record.mainAssets.Any(path => path.IndexOf("/Generated/AOTMetadata/",
@@ -212,11 +223,8 @@ namespace GameIntegration.Editor
             string aotMetadataMismatchReason = string.Empty;
             if (options.mode == ReleaseMode.HotUpdateOnly)
             {
-                string versionedSnapshot = AotMetadataSnapshotStore.GetRoot(options.target,
+                string snapshotRoot = AotMetadataSnapshotStore.GetRoot(options.target,
                     options.clientVersion);
-                string snapshotRoot = Directory.Exists(versionedSnapshot)
-                    ? versionedSnapshot
-                    : AotMetadataSnapshotStore.GetRoot(options.target);
                 aotMetadataPayloadMatched = AotMetadataSnapshotStore.MatchesSnapshot(options.target,
                     Path.GetFullPath(IntegrationProjectPaths.GeneratedAotMetadata), snapshotRoot,
                     out string mismatchReason);
@@ -263,28 +271,49 @@ namespace GameIntegration.Editor
                         "[QHYFramework] AOT Metadata Bundle 发生变化，但其中所有元数据文件的名称、长度和 SHA-256 均与已发布客户端快照一致，因此允许继续发布。Bundle 变化可能来自打包布局或依赖变化；当前工程的 AOT 代码不会在旧客户端中生效。",
                         "[QHYFramework] The AOT Metadata bundle changed, but every metadata file name, length, and SHA-256 still matches the published client snapshot, so publication is allowed. The bundle may have changed because of packing or dependency changes; local AOT code will not take effect in existing clients."));
             }
-            File.WriteAllText(Path.Combine(releaseRoot, "upload-plan.json"),
+            File.WriteAllText(Path.Combine(releaseRoot, "publish-plan.json"),
                 JsonUtility.ToJson(delta.UploadPlan, true), new UTF8Encoding(false));
 
             if (options.mode == ReleaseMode.FullPackage)
             {
-                string clientRoot = Path.Combine(releaseRoot, "Client");
+                DistributionRuntimeConfigGenerator.Synchronize(settings, options);
+                string clientRoot = Path.Combine(releaseRoot, "Player");
                 RecreateDirectory(clientRoot);
+                IReadOnlyList<string> strippingErrors =
+                    EngineStrippingLinkerAutomation.ValidateProtection(engineStrippingAnalysis,
+                        PlayerSettings.stripEngineCode);
+                if (strippingErrors.Count > 0)
+                    throw new InvalidOperationException(L("Player 构建前 Engine Stripping 校验失败：\n- ",
+                        "Pre-Player Engine Stripping validation failed:\n- ") +
+                                                        string.Join("\n- ", strippingErrors));
                 BuildPlayer(options, clientRoot);
+
+                if (File.Exists(IntegrationProjectPaths.GeneratedQhyLinkXml))
+                    File.Copy(IntegrationProjectPaths.GeneratedQhyLinkXml,
+                        Path.Combine(releaseRoot, "Reports", "qhy-link.xml"), false);
 
                 // Player 构建会重新生成 AssembliesPostIl2CppStrip，必须在构建完成后记录真实客户端基线。
                 baseline = ComputeAotBaseline(options.target);
                 Directory.CreateDirectory(Path.GetDirectoryName(baselinePath) ?? options.outputRoot);
                 File.WriteAllText(baselinePath, baseline, Encoding.UTF8);
-                ClientArtifactBuilder.Build(releaseRoot, clientRoot, settings, options);
+                ClientArtifactResult clientArtifact = ClientArtifactBuilder.Build(releaseRoot, clientRoot,
+                    settings, options);
+                if (clientArtifact != null)
+                {
+                    delta.UploadPlan.added = delta.UploadPlan.added.Concat(clientArtifact.Artifacts).ToArray();
+                    delta.UploadPlan.uploadBytes += clientArtifact.Artifacts.Sum(x => x.length);
+                    File.WriteAllText(Path.Combine(releaseRoot, "publish-plan.json"),
+                        JsonUtility.ToJson(delta.UploadPlan, true), new UTF8Encoding(false));
+                }
                 if (!string.IsNullOrWhiteSpace(androidSigningBaseline))
                     File.WriteAllText(androidSigningBaselinePath, androidSigningBaseline, Encoding.UTF8);
             }
 
+            IncrementalUploadMaterializer.Synchronize(options, delta.UploadPlan);
             string[] artifacts = WriteHashes(releaseRoot);
             var report = new ReleaseReportData
             {
-                channel = options.channel,
+                gameDirectory = options.gameDirectory,
                 version = options.clientVersion,
                 resourceVersion = options.resourceVersion,
                 previousResourceVersion = resourceBaseline?.resourceVersion ?? string.Empty,
@@ -292,9 +321,10 @@ namespace GameIntegration.Editor
                 mode = options.mode.ToString(),
                 unityVersion = Application.unityVersion,
                 clientVersion = options.clientVersion,
-                remoteBaseUrl = settings.GetRemotePackageUrl(GetIntegrationPlatform(options.target),
-                    options.clientVersion),
-                clientManifestUrl = settings.GetClientManifestUrl(GetIntegrationPlatform(options.target)),
+                cdnRoot = delta.UploadPlan.cdnRoot,
+                originRoot = delta.UploadPlan.originRoot,
+                clientManifestUrl = DistributionPathResolver.CombineUrl(delta.UploadPlan.originRoot,
+                    "current/client.json"),
                 timestampUtc = DateTime.UtcNow.ToString("O"),
                 aotBaselineSha256 = baseline,
                 aotMetadataAssemblies = effectiveAotMetadata,
@@ -318,6 +348,15 @@ namespace GameIntegration.Editor
                 aotClientBaselineMatched = options.mode == ReleaseMode.FullPackage ||
                                            (aotMetadataPayloadMatched &&
                                             !string.IsNullOrWhiteSpace(baseline)),
+                stripEngineCode = PlayerSettings.stripEngineCode,
+                engineStrippingLinkPath = options.mode == ReleaseMode.FullPackage
+                    ? IntegrationProjectPaths.GeneratedQhyLinkXml
+                    : string.Empty,
+                engineStrippingProtectedAssemblies = engineStrippingAnalysis?.RequiredAssemblies ??
+                                                      Array.Empty<string>(),
+                externalAnimationAssetCount = engineStrippingAnalysis?.AnimationAssetPaths.Length ?? 0,
+                externalAnimationAssets = engineStrippingAnalysis?.AnimationAssetPaths ??
+                                          Array.Empty<string>(),
                 addedBundles = delta.Added,
                 changedBundles = delta.Changed,
                 unchangedBundles = delta.Unchanged,
@@ -325,6 +364,7 @@ namespace GameIntegration.Editor
             };
             File.WriteAllText(Path.Combine(releaseRoot, "release-report.json"),
                 JsonUtility.ToJson(report, true), Encoding.UTF8);
+            ReleaseBaselineStore.SaveBuilt(options, releaseRoot, delta.UploadPlan);
             AssetDatabase.Refresh();
             Debug.Log(F("[QHYFramework] 发布完成：{0}\n完整资源快照：{1}；实际上传计划：{2}；预计客户端下载：{3}",
                 "[QHYFramework] Release completed: {0}\nSnapshot: {1}; planned upload: {2}; estimated client download: {3}",
@@ -586,9 +626,12 @@ namespace GameIntegration.Editor
         private static string[] WriteHashes(string releaseRoot)
         {
             string hashPath = Path.Combine(releaseRoot, "artifacts.sha256");
+            string uploadRoot = Path.GetFullPath(Path.Combine(releaseRoot, "Upload")) +
+                                Path.DirectorySeparatorChar;
             var files = Directory.GetFiles(releaseRoot, "*", SearchOption.AllDirectories)
                 .Where(path => !string.Equals(path, hashPath, StringComparison.OrdinalIgnoreCase) &&
-                               !path.EndsWith("release-report.json", StringComparison.OrdinalIgnoreCase))
+                               !path.EndsWith("release-report.json", StringComparison.OrdinalIgnoreCase) &&
+                               !Path.GetFullPath(path).StartsWith(uploadRoot, StringComparison.OrdinalIgnoreCase))
                 .OrderBy(path => path, StringComparer.OrdinalIgnoreCase).ToArray();
             var lines = new List<string>(files.Length);
             using SHA256 sha = SHA256.Create();
@@ -617,8 +660,6 @@ namespace GameIntegration.Editor
 
         private static void ValidateOptions(ReleaseOptions options)
         {
-            if (string.IsNullOrWhiteSpace(options.channel))
-                throw new ArgumentException(L("发布渠道不能为空。", "Channel cannot be empty."));
             if (string.IsNullOrWhiteSpace(options.clientVersion))
                 throw new ArgumentException(L("客户端版本不能为空。", "Client Version cannot be empty."));
             if (string.IsNullOrWhiteSpace(options.resourceVersion))
@@ -647,7 +688,8 @@ namespace GameIntegration.Editor
             if (options == null) throw new ArgumentNullException(nameof(options));
             if (options.target != BuildTarget.Android || options.developmentBuild)
                 return;
-            string baselinePath = Path.Combine(options.outputRoot, "Baselines", "Android.signing.sha256");
+            string baselinePath = Path.Combine(DistributionReleaseLayout.StateRoot(options),
+                "android-signing.sha256");
             ValidateAndroidSigning(options, baselinePath);
         }
 
@@ -682,20 +724,6 @@ namespace GameIntegration.Editor
             }
             Directory.CreateDirectory(Path.GetDirectoryName(baselinePath) ?? options.outputRoot);
             return current;
-        }
-
-        private static void ValidateHotUpdateClientVersion(string baselinePath, string version, string platform)
-        {
-            if (!File.Exists(baselinePath))
-                throw new InvalidOperationException(F(
-                    "{0} 尚未建立支持整包更新的客户端版本基线，请先执行 Full Package Build。",
-                    "No full-client update baseline exists for {0}. Run Full Package Build first.", platform));
-            string publishedVersion = File.ReadAllText(baselinePath).Trim();
-            if (!string.Equals(publishedVersion, version, StringComparison.Ordinal))
-                throw new InvalidOperationException(F(
-                    "HotUpdateOnly 不能改变客户端版本。当前完整客户端为 {0}，发布窗口为 {1}；请恢复版本或改用 Full Package Build。",
-                    "HotUpdateOnly cannot change the client version. Full client: {0}, release window: {1}. " +
-                    "Restore the version or use Full Package Build.", publishedVersion, version));
         }
 
         private static void EnsureActiveBuildTarget(BuildTarget target)
@@ -734,14 +762,15 @@ namespace GameIntegration.Editor
         public static string GetReleaseRoot(ReleaseOptions options)
         {
             if (options == null) throw new ArgumentNullException(nameof(options));
-            return Path.Combine(GetClientVersionRoot(options), "Revisions", options.resourceVersion);
+            return DistributionReleaseLayout.BuildRoot(options);
         }
 
         internal static string GetClientVersionRoot(ReleaseOptions options)
         {
             if (options == null) throw new ArgumentNullException(nameof(options));
-            return Path.GetFullPath(Path.Combine(options.outputRoot, options.channel,
-                GetPlatformName(options.target), options.clientVersion));
+            return Path.GetFullPath(Path.Combine(
+                string.IsNullOrWhiteSpace(options.buildRootOverride) ? "QHYBuilds" : options.buildRootOverride,
+                DistributionReleaseLayout.Platform(options), options.clientVersion));
         }
 
         public static IntegrationPlatform GetIntegrationPlatform(BuildTarget target)

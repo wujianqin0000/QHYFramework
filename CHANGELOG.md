@@ -4,6 +4,81 @@ All notable changes to this package are documented here.
 
 ## [Unreleased]
 
+## [1.1.7] - 2026-09-21
+
+- Fixed FTP incremental publication trusting `origin/qhy.json` as proof that an indexed Bundle still
+  existed. Before skipping a Bundle, QHY now performs a lightweight parallel FTP `SIZE` check against
+  the exact `{gameDirectory}/{platform}/cdn/bundles/{hash}.bundle`; a missing or mismatched object is
+  uploaded again, and servers without `SIZE` safely fall back to re-upload instead of activating a
+  broken manifest. Runtime download failures now report the logical Bundle name, actual hashed file,
+  resolved URL, and transport error instead of only YooAsset's logical `Failed to download file` text.
+- Changed the Release window Build Target selector into an immediate Unity platform switch. QHY
+  now saves the previous platform's version/FTP preferences, validates installed Build Support,
+  calls `SwitchActiveBuildTarget`, loads the selected platform's preferences, and refreshes all
+  Inspectors so `QHYFrameworkSettings` immediately shows that platform's BaseURL. The selector is
+  disabled while Unity is building, compiling, importing, or uploading; failed switches restore
+  the actual active target and show a diagnostic instead of leaving the Release window out of sync.
+- Fixed a valid target-platform BaseURL being rejected because another saved platform still
+  contained an invalid value. Release validation now checks URL syntax only for the selected build
+  target while retaining global duplicate/Unknown profile checks. BaseURL input now accepts bare
+  hosts such as `aco.ai20.top`, canonicalizes them to HTTPS, and safely unwraps exact Markdown or
+  angle-bracket links copied from rich-text tools. The Inspector writes the canonical URL back and
+  validation errors identify the affected platform and original value.
+- Added project-level version-control protection for generated publication output. On import and
+  before every release build, QHY now idempotently creates/updates a marked block in Plastic
+  `ignore.conf` and, when Git is present, `.gitignore`, excluding root `Releases` and `QHYBuilds`
+  without replacing user rules. A read-only or malformed ignore file blocks publication before
+  large artifacts are generated, and newly added rules warn that already tracked files must be
+  removed from version control manually. `ProjectSettings/QHYFramework/ReleaseState` remains
+  intentionally tracked.
+- Replaced the unreleased root-level platform layout with intentionally incompatible schema v5.
+  A required, stable `gameDirectory` now wraps every server artifact:
+  `Releases/{gameDirectory}/{platform}` locally, `{gameDirectory}/{platform}` below the FTP login
+  root, and `{baseUrl}/{gameDirectory}/{platform}` at runtime. This lets one server resource root
+  host multiple games without path collisions. Each platform continues to separate immutable
+  `cdn/{bundles,versions,clients}` from mutable `origin/{current,qhy.json}`. The Settings Inspector validates a single lowercase
+  directory segment and previews the exact CDN/Origin roots. FTP, manual incremental upload,
+  verification, rollback, runtime routing, and `publish-plan.json` all use the same relative path.
+  There is no migration; clear local outputs, release state, and the old server resources, then run
+  a new FullPackage.
+- Fixed **Open 1-Files** and **Open 2-Publish** passing nonexistent or incomplete-version paths to
+  Unity's file-manager reveal API, which could open an unrelated parent/file and leave the Editor at
+  `Hold On`. Both buttons are now disabled until their exact directories exist, paths are confined to
+  the current build's `Upload` root, and the click handler rechecks existence before opening.
+- Removed FTP `RemoteRoot` from the Release window and upload options. The FTP account's login
+  directory is now always the shared resource root, and QHY uploads
+  `{gameDirectory}/{platform}/{cdn|origin}` below it. Obsolete per-platform `RemoteRoot`
+  EditorPrefs are deleted.
+- Fixed FullPackage and HotUpdateOnly failing immediately after deriving valid schema-v4 roots. The
+  user-entered platform BaseURL still rejects a trailing `/cdn` or `/origin`, while generated
+  `DistributionRuntimeConfig.cdnRoot` and `originRoot` are now validated against their required
+  derived folder instead of incorrectly reusing the platform-root rule.
+- Changed platform resource editing back to an active-BuildTarget view: the Inspector displays only
+  the current platform profile, with no manual platform selector or all-platform list. BaseURL now
+  means the shared resource root such as `https://res.example.com`; QHY appends the platform segment
+  and derives `/{platform}/cdn` plus `/{platform}/origin`. Profiles remain independently stored so
+  switching Unity BuildTarget does not overwrite another platform. The built-in one-click Player
+  pipeline remains scoped to Windows and Android.
+- Fixed concurrent FTP uploads caching a remote directory before `MKD` had completed and treating
+  every directory-creation error as "already exists", which could make later uploads fail with an
+  opaque 553 response. Directory preparation is now serialized, each level is verified before it
+  is cached, and path/permission failures identify the exact remote directory and required login-root
+  permissions.
+- Moved per-ClientVersion frozen AOT metadata from ignored `Library` storage into the tracked
+  platform ReleaseState tree. HotUpdateOnly can now restore the published client metadata on a
+  different developer machine or CI runner; missing or manifest-less old snapshots require a new
+  FullPackage baseline.
+- Fixed FullPackage IL2CPP Engine Stripping analysis ignoring Unity Engine types that exist only in
+  YooAsset bundles. FullPackage now performs a dependency-aware collection pass, detects external
+  `AnimationClip`, animator controller/override, `Motion`, `Avatar`, `AvatarMask`, and imported model
+  animation content,
+  regenerates `Assets/Game/Generated/QHYLink/link.xml` with full
+  `UnityEngine.AnimationModule` preservation, synchronously imports it before Player build, and
+  blocks publication when `stripEngineCode` is enabled but protection is missing or incomplete.
+  `release-report.json` now audits the generated link path, protected assemblies, stripping flag,
+  and external animation count/path list. HybridCLR's generated link file is never modified, and
+  supplemental AOT metadata remains a separate concern.
+
 ## [1.1.6] - 2026-08-26
 
 - Reorganized the Release window into clearer build, FTP upload, and online-resource recovery

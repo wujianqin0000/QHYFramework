@@ -24,6 +24,7 @@ namespace GameIntegration
         private BootUGUIView _view;
         private bool _leavingBoot;
         private bool _waitingClientUpdate;
+        private DistributionRuntimeConfig _distribution;
 
         private void Awake()
         {
@@ -72,9 +73,10 @@ namespace GameIntegration
             _error = string.Empty;
             try
             {
+                _distribution ??= DistributionRuntimeConfigLoader.Load(settings, PlayMode);
                 if (PlayMode == EPlayMode.HostPlayMode)
                 {
-                    _clientUpdate ??= new ClientUpdateService(settings, OnProgressChanged);
+                    _clientUpdate ??= new ClientUpdateService(settings, _distribution, OnProgressChanged);
                     if (await _clientUpdate.CheckAsync())
                     {
                         _waitingClientUpdate = true;
@@ -85,7 +87,7 @@ namespace GameIntegration
                 _waitingClientUpdate = false;
                 if (_runtime == null)
                 {
-                    _runtime = new GamePackageRuntime(settings, PlayMode);
+                    _runtime = new GamePackageRuntime(settings, PlayMode, _distribution);
                     _runtime.ProgressChanged += OnProgressChanged;
                 }
                 await _runtime.StartAsync();

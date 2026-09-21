@@ -125,9 +125,16 @@ namespace GameIntegration.Editor
             serializedObject.Update();
             NormalizeConfiguredAssemblies();
 
+            EditorGUILayout.LabelField(L("平台资源地址", "Platform Resource URLs"), EditorStyles.boldLabel);
+            Draw("gameDirectory", "游戏资源目录", "Game Resource Directory");
+            DrawCurrentPlatformResourceProfile();
+            EditorGUILayout.HelpBox(L(
+                "BaseURL 只填写服务器资源总根；QHY 自动生成 /{游戏资源目录}/{platform}/cdn 和 /{游戏资源目录}/{platform}/origin。一个服务器根可放置多个游戏。",
+                "Enter only the server resource root. QHY derives /{gameDirectory}/{platform}/cdn and /{gameDirectory}/{platform}/origin, allowing multiple games under one server root."),
+                MessageType.Info);
+
+            EditorGUILayout.Space(8);
             EditorGUILayout.LabelField(L("YooAsset 配置", "YooAsset Settings"), EditorStyles.boldLabel);
-            Draw("packageName", "资源包名称", "Package Name");
-            DrawPlatformProfiles();
             Draw("editorSimulatePackageRoot", "编辑器模拟目录", "Editor Simulation Root");
             Draw("requestTimeoutSeconds", "请求超时（秒）", "Request Timeout (seconds)");
             Draw("downloadConcurrency", "下载并发数", "Download Concurrency");
@@ -159,6 +166,99 @@ namespace GameIntegration.Editor
             DrawAssemblySelection();
 
             serializedObject.ApplyModifiedProperties();
+        }
+
+        private void DrawCurrentPlatformResourceProfile()
+        {
+            IntegrationPlatform currentPlatform = QHYFrameworkSettings.GetCurrentPlatform();
+            EditorGUILayout.LabelField(L("当前构建平台", "Active Build Platform"),
+                currentPlatform.ToString());
+            if (currentPlatform == IntegrationPlatform.Unknown)
+            {
+                EditorGUILayout.HelpBox(L(
+                    "当前 Unity BuildTarget 不受支持，请先切换到受支持的平台。",
+                    "The active Unity BuildTarget is unsupported. Switch to a supported platform first."),
+                    MessageType.Error);
+                return;
+            }
+
+            SerializedProperty profiles = serializedObject.FindProperty("platformResourceProfiles");
+            var matches = new List<int>();
+            for (int index = 0; index < profiles.arraySize; index++)
+            {
+                SerializedProperty platform = profiles.GetArrayElementAtIndex(index)
+                    .FindPropertyRelative("platform");
+                if ((IntegrationPlatform)platform.intValue == currentPlatform) matches.Add(index);
+            }
+
+            if (matches.Count == 0)
+            {
+                EditorGUILayout.HelpBox(string.Format(L(
+                    "尚未创建 {0} 的资源配置。",
+                    "No resource profile exists for {0}."), currentPlatform), MessageType.Info);
+                if (GUILayout.Button(L("创建当前平台配置", "Create Active Platform Profile")))
+                {
+                    int newIndex = profiles.arraySize;
+                    profiles.InsertArrayElementAtIndex(newIndex);
+                    SerializedProperty item = profiles.GetArrayElementAtIndex(newIndex);
+                    item.FindPropertyRelative("platform").intValue = (int)currentPlatform;
+                    item.FindPropertyRelative("baseUrl").stringValue = string.Empty;
+                }
+                return;
+            }
+
+            if (matches.Count > 1)
+            {
+                EditorGUILayout.HelpBox(string.Format(L(
+                    "{0} 存在重复配置，发布前必须只保留一项。",
+                    "{0} has duplicate profiles. Keep exactly one before publication."), currentPlatform),
+                    MessageType.Error);
+                if (GUILayout.Button(L("保留第一项并删除重复配置", "Keep First and Remove Duplicates")))
+                {
+                    for (int index = matches.Count - 1; index >= 1; index--)
+                        profiles.DeleteArrayElementAtIndex(matches[index]);
+                }
+                return;
+            }
+
+            SerializedProperty profile = profiles.GetArrayElementAtIndex(matches[0]);
+            SerializedProperty urlProperty = profile.FindPropertyRelative("baseUrl");
+            EditorGUI.BeginChangeCheck();
+            EditorGUILayout.PropertyField(urlProperty, new GUIContent("BaseURL",
+                L("可填写 aco.ai20.top 或 https://aco.ai20.top；裸域名会自动补全 HTTPS。不要填写平台、cdn 或 origin 目录。",
+                    "Enter aco.ai20.top or https://aco.ai20.top; bare hosts are completed as HTTPS. Do not include platform, cdn, or origin folders.")));
+            if (EditorGUI.EndChangeCheck() && !string.IsNullOrWhiteSpace(urlProperty.stringValue))
+            {
+                try
+                {
+                    urlProperty.stringValue = QHYFrameworkSettings.NormalizeResourceBaseUrl(
+                        urlProperty.stringValue);
+                }
+                catch
+                {
+                    // Keep invalid text visible so the inline validation below can explain it.
+                }
+            }
+            if (!string.IsNullOrWhiteSpace(urlProperty.stringValue))
+            {
+                try
+                {
+                    string root = QHYFrameworkSettings.NormalizeResourceBaseUrl(urlProperty.stringValue);
+                    string gameRoot = DistributionPathResolver.CombineUrl(root,
+                        ((QHYFrameworkSettings)target).GetGameDirectoryOrThrow());
+                    string platformRoot = DistributionPathResolver.CombineUrl(gameRoot,
+                        DistributionPathResolver.GetPlatformSegment(currentPlatform));
+                    using (new EditorGUI.DisabledScope(true))
+                    {
+                        EditorGUILayout.TextField("CDN Root", platformRoot + "/cdn");
+                        EditorGUILayout.TextField("Origin Root", platformRoot + "/origin");
+                    }
+                }
+                catch (Exception exception)
+                {
+                    EditorGUILayout.HelpBox(exception.GetBaseException().Message, MessageType.Error);
+                }
+            }
         }
 
         private void NormalizeConfiguredAssemblies()
@@ -580,31 +680,6 @@ namespace GameIntegration.Editor
                 return;
             EditorGUILayout.PropertyField(property, new GUIContent(L(chinese, english),
                 L(chineseTooltip ?? string.Empty, englishTooltip ?? string.Empty)), includeChildren);
-        }
-
-        private void DrawPlatformProfiles()
-        {
-            SerializedProperty array = serializedObject.FindProperty("platformProfiles");
-            EditorGUILayout.LabelField(L("平台远端配置", "Platform Remote Profiles"), EditorStyles.boldLabel);
-            for (int index = 0; index < array.arraySize; index++)
-            {
-                SerializedProperty item = array.GetArrayElementAtIndex(index);
-                EditorGUILayout.BeginVertical(EditorStyles.helpBox);
-                EditorGUILayout.PropertyField(item.FindPropertyRelative("platform"), new GUIContent(L("平台", "Platform")));
-                EditorGUILayout.PropertyField(item.FindPropertyRelative("remoteBaseUrl"),
-                    new GUIContent(L("远端根地址（不含版本）", "Remote Base URL (without version)")));
-                EditorGUILayout.PropertyField(item.FindPropertyRelative("clientUpdateBaseUrl"),
-                    new GUIContent(L("客户端更新根地址", "Client Update Base URL")));
-                if (GUILayout.Button(L("移除", "Remove"), GUILayout.Width(80)))
-                {
-                    array.DeleteArrayElementAtIndex(index);
-                    EditorGUILayout.EndVertical();
-                    break;
-                }
-                EditorGUILayout.EndVertical();
-            }
-            if (GUILayout.Button(L("添加平台", "Add Platform")))
-                array.InsertArrayElementAtIndex(array.arraySize);
         }
 
         private static string L(string chinese, string english)

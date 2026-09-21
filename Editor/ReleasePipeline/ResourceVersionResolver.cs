@@ -99,8 +99,7 @@ namespace GameIntegration.Editor
             string root;
             try
             {
-                root = Path.GetFullPath(Path.Combine(options.outputRoot, options.channel,
-                    ReleasePipeline.GetPlatformName(options.target), options.clientVersion));
+                root = ReleasePipeline.GetClientVersionRoot(options);
                 if (!Directory.Exists(root)) return string.Empty;
             }
             catch
@@ -114,11 +113,6 @@ namespace GameIntegration.Editor
                 foreach (string directory in Directory.GetDirectories(root))
                     highest = SelectHigher(options.clientVersion, highest,
                         Path.GetFileName(directory));
-                string revisions = Path.Combine(root, "Revisions");
-                if (Directory.Exists(revisions))
-                    foreach (string directory in Directory.GetDirectories(revisions))
-                        highest = SelectHigher(options.clientVersion, highest,
-                            Path.GetFileName(directory));
             }
             catch
             {

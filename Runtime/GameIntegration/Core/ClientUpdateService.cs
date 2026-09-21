@@ -7,6 +7,7 @@ using System.Security.Cryptography;
 using System.Threading.Tasks;
 using UnityEngine;
 using UnityEngine.Networking;
+using YooAsset;
 
 namespace GameIntegration
 {
@@ -18,6 +19,7 @@ namespace GameIntegration
     public sealed class ClientUpdateService
     {
         private readonly QHYFrameworkSettings _settings;
+        private readonly DistributionRuntimeConfig _distribution;
         private readonly Action<StartupProgress> _report;
         private readonly IClientInstaller _installer;
 
@@ -27,8 +29,16 @@ namespace GameIntegration
 
         public ClientUpdateService(QHYFrameworkSettings settings, Action<StartupProgress> report,
             IClientInstaller installer = null)
+            : this(settings, DistributionRuntimeConfigLoader.Load(settings, EPlayMode.HostPlayMode), report,
+                installer)
+        {
+        }
+
+        public ClientUpdateService(QHYFrameworkSettings settings, DistributionRuntimeConfig distribution,
+            Action<StartupProgress> report, IClientInstaller installer = null)
         {
             _settings = settings ? settings : throw new ArgumentNullException(nameof(settings));
+            _distribution = distribution ?? throw new ArgumentNullException(nameof(distribution));
             _report = report;
             _installer = installer ?? ClientInstallerFactory.Create();
         }
@@ -41,7 +51,7 @@ namespace GameIntegration
             if (platform != IntegrationPlatform.Windows && platform != IntegrationPlatform.Android)
                 return false;
 
-            string url = _settings.GetClientManifestUrl(platform);
+            string url = _distribution.ClientManifestUrl;
             if (string.IsNullOrWhiteSpace(url))
             {
                 UnityEngine.Debug.LogWarning($"[QHYFramework] {platform} 未配置客户端更新地址，跳过整包更新检查。");
@@ -202,7 +212,7 @@ namespace GameIntegration
 
         private static void ValidateManifest(ClientUpdateManifest manifest, IntegrationPlatform platform)
         {
-            if (manifest == null || manifest.SchemaVersion != 1)
+            if (manifest == null || manifest.SchemaVersion != DistributionRuntimeConfig.CurrentSchemaVersion)
                 throw new InvalidDataException("客户端更新清单格式无效。");
             if (!string.Equals(manifest.Platform, platform.ToString(), StringComparison.OrdinalIgnoreCase))
                 throw new InvalidDataException($"客户端更新清单平台不匹配：{manifest.Platform} != {platform}");
